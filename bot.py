@@ -878,6 +878,155 @@ async def web_backup_all_handler(request: web.Request) -> web.StreamResponse:
         },
     )
 
+async def collect_backup_payloads() -> dict[str, bytes]:
+    endpoints = {
+        "movies.json": "/api/movies",
+        "series.json": "/api/series",
+        "collections.json": "/api/collections",
+    }
+    payloads: dict[str, bytes] = {}
+    for filename, path in endpoints.items():
+        data = await api_get(path)
+        if data is None:
+            raise RuntimeError(f"Unable to fetch {path}")
+        payloads[filename] = json.dumps(data, indent=2, ensure_ascii=False).encode()
+    return payloads
+
+async def create_backup_zip_bytes() -> tuple[bytes, str]:
+    payloads = await collect_backup_payloads()
+    ts = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for fname, content in payloads.items():
+            zf.writestr(f"{ts}_{fname}", content)
+    zip_buffer.seek(0)
+    return zip_buffer.read(), ts
+
+async def auto_ping_services():
+    global LAST_AUTO_PING_AT
+    targets = [("backend", BACKEND_URL)]
+    if BOT_WEB_URL:
+        targets.append(("bot", f"{BOT_WEB_URL}/health"))
+    try:
+        async with aiohttp.ClientSession() as s:
+            for name, url in targets:
+                try:
+                    async with s.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                        logger.info("Auto ping %s => %s (%s)", name, r.status, url)
+                except Exception as e:
+                    logger.warning("Auto ping failed for %s (%s): %s", name, url, e)
+    finally:
+        LAST_AUTO_PING_AT = datetime.now()
+
+async def web_health_handler(request: web.Request) -> web.Response:
+    now = datetime.now()
+    uptime = str((now - BOT_STARTED_AT)).split(".")[0]
+    backend_status = "offline"
+    backend_code = "N/A"
+    backend_latency = "N/A"
+    backend_error = ""
+    try:
+        start = datetime.now()
+        async with aiohttp.ClientSession() as s:
+            async with s.get(BACKEND_URL, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                backend_code = str(r.status)
+                backend_latency = f"{(datetime.now() - start).total_seconds() * 1000:.0f}ms"
+                backend_status = "online" if r.status == 200 else "degraded"
+    except Exception as exc:
+        backend_error = str(exc)
+
+    backup_text = LAST_BACKUP_AT.strftime("%Y-%m-%d %H:%M:%S") if LAST_BACKUP_AT else "Never"
+    ping_text = LAST_AUTO_PING_AT.strftime("%Y-%m-%d %H:%M:%S") if LAST_AUTO_PING_AT else "Never"
+    movies = await api_get("/api/movies") or []
+    series = await api_get("/api/series") or []
+    collections = await api_get("/api/collections") or {}
+    html = f"""<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SCFiles Bot Health</title>
+    <style>
+      :root {{
+        --bg:#0b1220; --card:#101a2e; --text:#e6edf7; --muted:#9fb0cc;
+        --ok:#3ddc97; --warn:#ffcf5a; --bad:#ff6b6b; --accent:#4da3ff;
+      }}
+      body {{ font-family: Inter, Arial, sans-serif; max-width: 980px; margin: 2rem auto; padding: 0 1rem; background:var(--bg); color:var(--text); }}
+      .grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; margin-bottom:1rem; }}
+      .card {{ background:var(--card); border:1px solid #1f2a44; border-radius:12px; padding:1rem; margin-bottom:1rem; }}
+      .kpi {{ font-size:1.6rem; font-weight:700; margin-top:.4rem; }}
+      .ok {{ color: var(--ok); }}
+      .warn {{ color: var(--warn); }}
+      .bad {{ color: var(--bad); }}
+      a.button {{ display: inline-block; padding: .7rem 1rem; background:var(--accent); color: #fff; border-radius: 8px; text-decoration: none; margin-right:8px; }}
+      code {{ background: #17243b; padding: 2px 6px; border-radius: 4px; color:#d8e6ff; }}
+      .muted {{ color:var(--muted); font-size:.92rem; }}
+    </style>
+  </head>
+  <body>
+    <h1>SCFiles Bot Dashboard</h1>
+    <p class="muted">Auto refresh every 60 seconds • Last updated: {now.strftime("%Y-%m-%d %H:%M:%S")}</p>
+    <div class="grid">
+      <div class="card"><div class="muted">Movies</div><div class="kpi">{len(movies)}</div></div>
+      <div class="card"><div class="muted">Series</div><div class="kpi">{len(series)}</div></div>
+      <div class="card"><div class="muted">Collections</div><div class="kpi">{len(collections)}</div></div>
+    </div>
+    <div class="card">
+      <h2>Bot Health</h2>
+      <p>Status: <span class="ok">online</span></p>
+      <p>Uptime: <code>{uptime}</code></p>
+      <p>Last backup: <code>{backup_text}</code></p>
+      <p>Last auto ping: <code>{ping_text}</code></p>
+    </div>
+    <div class="card">
+      <h2>Backend Health</h2>
+      <p>Status: <span class="{'ok' if backend_status == 'online' else 'warn' if backend_status == 'degraded' else 'bad'}">{backend_status}</span></p>
+      <p>URL: <code>{BACKEND_URL}</code></p>
+      <p>Status code: <code>{backend_code}</code></p>
+      <p>Latency: <code>{backend_latency}</code></p>
+      <p>Error: <code>{backend_error or 'None'}</code></p>
+    </div>
+    <a class="button" href="/backup/all">Backup All (Download ZIP)</a>
+    <a class="button" href="/health">View JSON Health</a>
+    <script>setTimeout(() => location.reload(), 60000);</script>
+  </body>
+</html>
+"""
+    return web.Response(text=html, content_type="text/html")
+
+async def web_json_health_handler(request: web.Request) -> web.Response:
+    now = datetime.now()
+    backend = {"status": "offline", "http_status": None, "latency_ms": None, "error": None}
+    try:
+        start = datetime.now()
+        async with aiohttp.ClientSession() as s:
+            async with s.get(BACKEND_URL, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                backend["http_status"] = r.status
+                backend["latency_ms"] = round((datetime.now() - start).total_seconds() * 1000, 2)
+                backend["status"] = "online" if r.status == 200 else "degraded"
+    except Exception as exc:
+        backend["error"] = str(exc)
+    return web.json_response({
+        "bot": {
+            "status": "online",
+            "uptime_seconds": int((now - BOT_STARTED_AT).total_seconds()),
+            "last_backup_at": LAST_BACKUP_AT.isoformat() if LAST_BACKUP_AT else None,
+            "last_auto_ping_at": LAST_AUTO_PING_AT.isoformat() if LAST_AUTO_PING_AT else None,
+        },
+        "backend": backend,
+        "time": now.isoformat(),
+    })
+
+async def web_backup_all_handler(request: web.Request) -> web.StreamResponse:
+    zip_bytes, ts = await create_backup_zip_bytes()
+    return web.Response(
+        body=zip_bytes,
+        headers={
+            "Content-Type": "application/zip",
+            "Content-Disposition": f'attachment; filename="backup_all_{ts}.zip"',
+        },
+    )
+
 async def cmd_backup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ Access denied.")
@@ -892,6 +1041,39 @@ async def cmd_backup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"❌ Backup failed: `{info}`\n\nSet/verify backup channel using `/setbackup <chat_id>`.",
             parse_mode=ParseMode.MARKDOWN,
         )
+
+async def cmd_backupall(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ Access denied.")
+        return
+    await update.message.reply_text("📦 Preparing backup ZIP…")
+    try:
+        zip_bytes, ts = await create_backup_zip_bytes()
+        await update.message.reply_document(
+            document=zip_bytes,
+            filename=f"backup_all_{ts}.zip",
+            caption="✅ Backup ZIP ready.",
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Failed to build ZIP backup.\n`{e}`", parse_mode=ParseMode.MARKDOWN)
+
+@admin_only
+async def cmd_setbackup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    global BACKUP_CHAT_TARGET
+    if not ctx.args:
+        current = BACKUP_CHAT_TARGET or "Not configured"
+        await update.message.reply_text(
+            f"📦 Current backup chat: `{current}`\n\nUsage:\n`/setbackup <chat_id>`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+    chat_id = ctx.args[0].strip()
+    BACKUP_CHAT_TARGET = chat_id
+    save_backup_chat_target(chat_id)
+    await update.message.reply_text(
+        f"✅ Backup chat updated to `{chat_id}`.\nAll auto/manual backups will use this chat.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
 
 async def cmd_backupall(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):

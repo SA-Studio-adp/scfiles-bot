@@ -111,6 +111,18 @@ Use `BOT_WEB_URL` so the auto ping job can hit your bot deployment and help keep
 
 ---
 
+## 🌐 Web Service
+
+The bot also starts a small web service:
+
+- `/` → HTML dashboard with bot/backend health + movie/series/collection counters
+- `/health` → JSON health payload
+- `/backup/all` → Download one ZIP with movies, series, and collections JSON
+
+Use `BOT_WEB_URL` so the auto ping job can hit your bot deployment and help keep it awake.
+
+---
+
 ## 💾 Backup Format
 
 Every 2 days (or on `/backup`), the bot sends three files to `BACKUP_CHAT_ID`:
