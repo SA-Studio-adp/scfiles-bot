@@ -7,11 +7,9 @@ with TMDB metadata, backup, and web service monitoring.
 import os
 import json
 import io
-import asyncio
 import logging
 import zipfile
 import aiohttp
-import aiofiles
 from datetime import datetime, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiohttp import web
@@ -21,6 +19,7 @@ from telegram.ext import (
     MessageHandler, ConversationHandler, ContextTypes, filters
 )
 from telegram.constants import ParseMode
+from telegram.helpers import escape_markdown
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -33,7 +32,8 @@ TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
 BACKEND_URL      = os.environ["BACKEND_URL"].rstrip("/")
 TMDB_API_KEY     = os.environ["TMDB_API_KEY"]
 ADMIN_IDS        = [int(x) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip()]
-BACKUP_CHAT_ID   = os.environ.get("BACKUP_CHAT_ID", "")      # chat/channel to send backups to
+BACKUP_CHAT_ID   = os.environ.get("BACKUP_CHAT_ID", "")      # legacy fallback
+BACKUP_CONFIG_FILE = os.environ.get("BACKUP_CONFIG_FILE", ".backup_config.json")
 WEB_HOST         = os.environ.get("WEB_HOST", "0.0.0.0")
 WEB_PORT         = int(os.environ.get("WEB_PORT", "8080"))
 BOT_WEB_URL      = os.environ.get("BOT_WEB_URL", "").rstrip("/")
@@ -44,6 +44,7 @@ TMDB_IMG         = "https://image.tmdb.org/t/p/w500"
 BOT_STARTED_AT   = datetime.now()
 LAST_BACKUP_AT   = None
 LAST_AUTO_PING_AT = None
+BACKUP_CHAT_TARGET = BACKUP_CHAT_ID
 BOT_COMMANDS = [
     ("start", "Main menu"),
     ("help", "Show available commands"),
@@ -61,6 +62,8 @@ BOT_COMMANDS = [
     ("delcollection", "Delete a collection (admin)"),
     ("tmdb", "Search TMDB metadata (admin)"),
     ("backup", "Run manual backup (admin)"),
+    ("backupall", "Download all data as ZIP (admin)"),
+    ("setbackup", "Set backup channel/chat ID (admin)"),
     ("cancel", "Cancel current operation"),
 ]
 
@@ -195,8 +198,11 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
          InlineKeyboardButton("🔍 TMDB Search", callback_data="menu_tmdb")],
         [InlineKeyboardButton("📊 Stats", callback_data="menu_stats"),
          InlineKeyboardButton("🌐 Server Status", callback_data="menu_status")],
-        [InlineKeyboardButton("💾 Backup Now", callback_data="menu_backup")],
+        [InlineKeyboardButton("💾 Backup Now", callback_data="menu_backup"),
+         InlineKeyboardButton("📥 Backup All ZIP", callback_data="menu_backup_all")],
     ]
+    if BOT_WEB_URL:
+        kb.append([InlineKeyboardButton("🩺 Open Web Dashboard", url=BOT_WEB_URL)])
     await update.message.reply_text(
         "🎛 *SCFiles Backend Manager*\n\nChoose an action:",
         reply_markup=InlineKeyboardMarkup(kb),
@@ -214,6 +220,22 @@ async def register_bot_commands(application: Application):
     )
     logger.info("Registered %s bot commands with Telegram.", len(BOT_COMMANDS))
 
+def load_backup_chat_target() -> str:
+    if os.path.exists(BACKUP_CONFIG_FILE):
+        try:
+            with open(BACKUP_CONFIG_FILE, "r", encoding="utf-8") as fp:
+                data = json.load(fp)
+                val = str(data.get("backup_chat_id", "")).strip()
+                if val:
+                    return val
+        except Exception as e:
+            logger.warning("Failed to load %s: %s", BACKUP_CONFIG_FILE, e)
+    return str(BACKUP_CHAT_ID).strip()
+
+def save_backup_chat_target(chat_id: str):
+    with open(BACKUP_CONFIG_FILE, "w", encoding="utf-8") as fp:
+        json.dump({"backup_chat_id": str(chat_id)}, fp, indent=2)
+
 # ──────────────────────────── SERVER STATUS ────────────────────────────
 async def check_status(update_or_query, is_query=False):
     send = update_or_query.edit_message_text if is_query else update_or_query.message.reply_text
@@ -226,28 +248,29 @@ async def check_status(update_or_query, is_query=False):
             async with s.get(BACKEND_URL, timeout=aiohttp.ClientTimeout(total=10)) as r:
                 elapsed = (datetime.now() - start).total_seconds() * 1000
                 status  = "🟢 Online" if r.status == 200 else f"🟡 Status {r.status}"
-                body    = await r.text()
+                body    = escape_markdown((await r.text())[:80], version=2)
                 msg     = (
                     f"*Health Details*\n\n"
                     f"🤖 Bot: {bot_health}\n"
-                    f"⏱ Bot Uptime: `{str(uptime).split('.')[0]}`\n\n"
+                    f"⏱ Bot Uptime: `{escape_markdown(str(uptime).split('.')[0], version=2)}`\n\n"
                     f"🖥 Backend: {status}\n"
-                    f"🔗 `{BACKEND_URL}`\n"
+                    f"🔗 `{escape_markdown(BACKEND_URL, version=2)}`\n"
                     f"⚡ Response: `{elapsed:.0f}ms`\n"
                     f"📨 Body: `{body[:80]}`\n"
-                    f"🕐 Checked: `{now.strftime('%Y-%m-%d %H:%M:%S')}`"
+                    f"🕐 Checked: `{escape_markdown(now.strftime('%Y-%m-%d %H:%M:%S'), version=2)}`"
                 )
     except Exception as e:
+        err = escape_markdown(str(e), version=2)
         msg = (
             f"*Health Details*\n\n"
             f"🤖 Bot: {bot_health}\n"
-            f"⏱ Bot Uptime: `{str(uptime).split('.')[0]}`\n\n"
+            f"⏱ Bot Uptime: `{escape_markdown(str(uptime).split('.')[0], version=2)}`\n\n"
             f"🖥 Backend: 🔴 Offline\n"
-            f"🔗 `{BACKEND_URL}`\n"
-            f"❗ Error: `{e}`\n"
-            f"🕐 Checked: `{now.strftime('%Y-%m-%d %H:%M:%S')}`"
+            f"🔗 `{escape_markdown(BACKEND_URL, version=2)}`\n"
+            f"❗ Error: `{err}`\n"
+            f"🕐 Checked: `{escape_markdown(now.strftime('%Y-%m-%d %H:%M:%S'), version=2)}`"
         )
-    await send(msg, parse_mode=ParseMode.MARKDOWN)
+    await send(msg, parse_mode=ParseMode.MARKDOWN_V2)
 
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await check_status(update)
@@ -633,8 +656,8 @@ async def tmdb_query(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def perform_backup(app: Application):
     """Fetch all data and send as JSON files to BACKUP_CHAT_ID."""
     global LAST_BACKUP_AT
-    if not BACKUP_CHAT_ID:
-        logger.warning("BACKUP_CHAT_ID not set, skipping backup.")
+    if not BACKUP_CHAT_TARGET:
+        logger.warning("Backup channel not set, skipping backup.")
         return
     endpoints = {
         "movies.json":      "/api/movies",
@@ -642,14 +665,14 @@ async def perform_backup(app: Application):
         "collections.json": "/api/collections",
     }
     ts = datetime.now().strftime("%Y-%m-%d_%H-%M")
-    await app.bot.send_message(BACKUP_CHAT_ID, f"💾 *Auto-Backup* — {ts}", parse_mode=ParseMode.MARKDOWN)
+    await app.bot.send_message(BACKUP_CHAT_TARGET, f"💾 *Auto-Backup* — {ts}", parse_mode=ParseMode.MARKDOWN)
     for filename, path in endpoints.items():
         data = await api_get(path)
         if data is not None:
             content = json.dumps(data, indent=2, ensure_ascii=False).encode()
             fname   = f"{ts}_{filename}"
             await app.bot.send_document(
-                BACKUP_CHAT_ID,
+                BACKUP_CHAT_TARGET,
                 document=content,
                 filename=fname,
                 caption=f"📦 `{fname}`",
@@ -671,6 +694,16 @@ async def collect_backup_payloads() -> dict[str, bytes]:
             raise RuntimeError(f"Unable to fetch {path}")
         payloads[filename] = json.dumps(data, indent=2, ensure_ascii=False).encode()
     return payloads
+
+async def create_backup_zip_bytes() -> tuple[bytes, str]:
+    payloads = await collect_backup_payloads()
+    ts = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for fname, content in payloads.items():
+            zf.writestr(f"{ts}_{fname}", content)
+    zip_buffer.seek(0)
+    return zip_buffer.read(), ts
 
 async def auto_ping_services():
     global LAST_AUTO_PING_AT
@@ -707,23 +740,40 @@ async def web_health_handler(request: web.Request) -> web.Response:
 
     backup_text = LAST_BACKUP_AT.strftime("%Y-%m-%d %H:%M:%S") if LAST_BACKUP_AT else "Never"
     ping_text = LAST_AUTO_PING_AT.strftime("%Y-%m-%d %H:%M:%S") if LAST_AUTO_PING_AT else "Never"
+    movies = await api_get("/api/movies") or []
+    series = await api_get("/api/series") or []
+    collections = await api_get("/api/collections") or {}
     html = f"""<!doctype html>
 <html>
   <head>
     <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>SCFiles Bot Health</title>
     <style>
-      body {{ font-family: Arial, sans-serif; max-width: 860px; margin: 2rem auto; padding: 0 1rem; }}
-      .card {{ border: 1px solid #ddd; border-radius: 10px; padding: 1rem; margin-bottom: 1rem; }}
-      .ok {{ color: #198754; }}
-      .warn {{ color: #b8860b; }}
-      .bad {{ color: #b02a37; }}
-      a.button {{ display: inline-block; padding: .7rem 1rem; background:#0d6efd; color: #fff; border-radius: 8px; text-decoration: none; }}
-      code {{ background: #f2f2f2; padding: 2px 4px; border-radius: 4px; }}
+      :root {{
+        --bg:#0b1220; --card:#101a2e; --text:#e6edf7; --muted:#9fb0cc;
+        --ok:#3ddc97; --warn:#ffcf5a; --bad:#ff6b6b; --accent:#4da3ff;
+      }}
+      body {{ font-family: Inter, Arial, sans-serif; max-width: 980px; margin: 2rem auto; padding: 0 1rem; background:var(--bg); color:var(--text); }}
+      .grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; margin-bottom:1rem; }}
+      .card {{ background:var(--card); border:1px solid #1f2a44; border-radius:12px; padding:1rem; margin-bottom:1rem; }}
+      .kpi {{ font-size:1.6rem; font-weight:700; margin-top:.4rem; }}
+      .ok {{ color: var(--ok); }}
+      .warn {{ color: var(--warn); }}
+      .bad {{ color: var(--bad); }}
+      a.button {{ display: inline-block; padding: .7rem 1rem; background:var(--accent); color: #fff; border-radius: 8px; text-decoration: none; margin-right:8px; }}
+      code {{ background: #17243b; padding: 2px 6px; border-radius: 4px; color:#d8e6ff; }}
+      .muted {{ color:var(--muted); font-size:.92rem; }}
     </style>
   </head>
   <body>
-    <h1>SCFiles Bot Web Service</h1>
+    <h1>SCFiles Bot Dashboard</h1>
+    <p class="muted">Auto refresh every 60 seconds • Last updated: {now.strftime("%Y-%m-%d %H:%M:%S")}</p>
+    <div class="grid">
+      <div class="card"><div class="muted">Movies</div><div class="kpi">{len(movies)}</div></div>
+      <div class="card"><div class="muted">Series</div><div class="kpi">{len(series)}</div></div>
+      <div class="card"><div class="muted">Collections</div><div class="kpi">{len(collections)}</div></div>
+    </div>
     <div class="card">
       <h2>Bot Health</h2>
       <p>Status: <span class="ok">online</span></p>
@@ -740,6 +790,8 @@ async def web_health_handler(request: web.Request) -> web.Response:
       <p>Error: <code>{backend_error or 'None'}</code></p>
     </div>
     <a class="button" href="/backup/all">Backup All (Download ZIP)</a>
+    <a class="button" href="/health">View JSON Health</a>
+    <script>setTimeout(() => location.reload(), 60000);</script>
   </body>
 </html>
 """
@@ -769,15 +821,9 @@ async def web_json_health_handler(request: web.Request) -> web.Response:
     })
 
 async def web_backup_all_handler(request: web.Request) -> web.StreamResponse:
-    payloads = await collect_backup_payloads()
-    ts = datetime.now().strftime("%Y-%m-%d_%H-%M")
-    zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-        for fname, content in payloads.items():
-            zf.writestr(f"{ts}_{fname}", content)
-    zip_buffer.seek(0)
+    zip_bytes, ts = await create_backup_zip_bytes()
     return web.Response(
-        body=zip_buffer.read(),
+        body=zip_bytes,
         headers={
             "Content-Type": "application/zip",
             "Content-Disposition": f'attachment; filename="backup_all_{ts}.zip"',
@@ -791,6 +837,39 @@ async def cmd_backup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("💾 Starting backup…")
     await perform_backup(ctx.application)
     await update.message.reply_text("✅ Backup sent!")
+
+async def cmd_backupall(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ Access denied.")
+        return
+    await update.message.reply_text("📦 Preparing backup ZIP…")
+    try:
+        zip_bytes, ts = await create_backup_zip_bytes()
+        await update.message.reply_document(
+            document=zip_bytes,
+            filename=f"backup_all_{ts}.zip",
+            caption="✅ Backup ZIP ready.",
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Failed to build ZIP backup.\n`{e}`", parse_mode=ParseMode.MARKDOWN)
+
+@admin_only
+async def cmd_setbackup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    global BACKUP_CHAT_TARGET
+    if not ctx.args:
+        current = BACKUP_CHAT_TARGET or "Not configured"
+        await update.message.reply_text(
+            f"📦 Current backup chat: `{current}`\n\nUsage:\n`/setbackup <chat_id>`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+    chat_id = ctx.args[0].strip()
+    BACKUP_CHAT_TARGET = chat_id
+    save_backup_chat_target(chat_id)
+    await update.message.reply_text(
+        f"✅ Backup chat updated to `{chat_id}`.\nAll auto/manual backups will use this chat.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
 
 # ──────────────────────────── CALLBACK ROUTER ────────────────────────────
 async def menu_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -812,6 +891,18 @@ async def menu_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("💾 Running backup…")
         await perform_backup(ctx.application)
         await q.edit_message_text("✅ Backup done!")
+    elif data == "menu_backup_all":
+        await q.edit_message_text("📦 Building backup ZIP…")
+        try:
+            zip_bytes, ts = await create_backup_zip_bytes()
+            await q.message.reply_document(
+                document=zip_bytes,
+                filename=f"backup_all_{ts}.zip",
+                caption="✅ Backup ZIP is ready.",
+            )
+            await q.edit_message_text("✅ Backup ZIP sent.")
+        except Exception as e:
+            await q.edit_message_text(f"❌ Could not build backup ZIP: {e}")
     elif data == "menu_movies":
         movies = await api_get("/api/movies?limit=10") or []
         lines  = [f"• `{m['id']}` | TMDB `{m.get('tmdb_id','?')}`" for m in movies[:10]]
@@ -832,6 +923,14 @@ async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data.clear()
     await update.message.reply_text("❌ Operation cancelled.")
     return ConversationHandler.END
+
+async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE):
+    logger.error("Unhandled bot error: %s", ctx.error)
+    if update and isinstance(update, Update) and update.effective_message:
+        try:
+            await update.effective_message.reply_text("⚠️ Something went wrong. Please try again.")
+        except Exception:
+            pass
 
 # ──────────────────────────── MAIN ────────────────────────────
 def main():
@@ -922,7 +1021,10 @@ def main():
     app.add_handler(CommandHandler("series",        cmd_series))
     app.add_handler(CommandHandler("collections",   cmd_collections))
     app.add_handler(CommandHandler("backup",        cmd_backup))
+    app.add_handler(CommandHandler("backupall",     cmd_backupall))
+    app.add_handler(CommandHandler("setbackup",     cmd_setbackup))
     app.add_handler(CommandHandler("cancel",        cmd_cancel))
+    app.add_error_handler(on_error)
 
     # Menu inline callbacks
     app.add_handler(CallbackQueryHandler(menu_callback, pattern="^menu_"))
@@ -949,6 +1051,8 @@ def main():
     app.job_queue  # ensure job queue is ready
 
     async def on_startup(application: Application):
+        global BACKUP_CHAT_TARGET
+        BACKUP_CHAT_TARGET = load_backup_chat_target()
         nonlocal web_runner
         web_app = web.Application()
         web_app.router.add_get("/", web_health_handler)
@@ -959,6 +1063,17 @@ def main():
         site = web.TCPSite(web_runner, host=WEB_HOST, port=WEB_PORT)
         await site.start()
         await register_bot_commands(application)
+        if not BACKUP_CHAT_TARGET:
+            logger.warning("No backup chat configured. Use /setbackup <chat_id>.")
+            for admin_id in ADMIN_IDS[:3]:
+                try:
+                    await application.bot.send_message(
+                        admin_id,
+                        "⚠️ Backup channel is not configured.\nUse `/setbackup <chat_id>` to enable auto backups.",
+                        parse_mode=ParseMode.MARKDOWN,
+                    )
+                except Exception as e:
+                    logger.warning("Could not notify admin %s about backup setup: %s", admin_id, e)
         scheduler.start()
         logger.info("Scheduler started — backup every 2 days, auto ping every %s minutes.", AUTO_PING_INTERVAL_MIN)
         logger.info("Web service started on %s:%s", WEB_HOST, WEB_PORT)

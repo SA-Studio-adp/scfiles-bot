@@ -17,8 +17,10 @@ A Telegram bot to fully manage your SCFiles backend — movies, series, collecti
 | 💾 Auto Backup | Every 2 days, sends JSON files to your Telegram chat |
 | 🧾 Backup All Download | Web service button to download all backend data in one ZIP |
 | 🩺 Health Web Service | Shows bot + backend health details in browser |
+| 🎨 Improved Web UI | Dashboard-style health page with auto refresh and DB counters |
 | 📡 Auto Pinging | Periodically pings backend and bot health URL to reduce sleeping |
 | 🤖 Auto Command Sync | Registers Telegram bot commands automatically on startup |
+| ⚙️ Backup Channel Setup | Configure backup target chat at runtime with `/setbackup` |
 | 🔐 Admin-only | Restrict write operations to specific user IDs |
 
 ---
@@ -88,6 +90,8 @@ python bot.py
 
 /tmdb          — Search TMDB for movie or TV show metadata
 /backup        — Trigger a manual backup now
+/backupall     — Download all backend data as one ZIP
+/setbackup     — Set backup channel/chat ID
 /cancel        — Cancel current operation
 ```
 
@@ -97,7 +101,7 @@ python bot.py
 
 The bot also starts a small web service:
 
-- `/` → HTML dashboard with bot/backend health details
+- `/` → HTML dashboard with bot/backend health + movie/series/collection counters
 - `/health` → JSON health payload
 - `/backup/all` → Download one ZIP with movies, series, and collections JSON
 
@@ -112,6 +116,14 @@ Every 2 days (or on `/backup`), the bot sends three files to `BACKUP_CHAT_ID`:
 - `YYYY-MM-DD_HH-MM_movies.json`
 - `YYYY-MM-DD_HH-MM_series.json`
 - `YYYY-MM-DD_HH-MM_collections.json`
+
+You can change the destination at runtime:
+
+```bash
+/setbackup <chat_id>
+```
+
+This value is persisted in `.backup_config.json` (configurable via `BACKUP_CONFIG_FILE`).
 
 ---
 
