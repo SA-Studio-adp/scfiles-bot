@@ -95,6 +95,20 @@ python bot.py
 /cancel        — Cancel current operation
 ```
 
+`/backup` now reports the exact destination chat ID and shows a setup hint if backup target is not configured.
+
+---
+
+## 🌐 Web Service
+
+The bot also starts a small web service:
+
+- `/` → HTML dashboard with bot/backend health + movie/series/collection counters
+- `/health` → JSON health payload
+- `/backup/all` → Download one ZIP with movies, series, and collections JSON
+
+Use `BOT_WEB_URL` so the auto ping job can hit your bot deployment and help keep it awake.
+
 ---
 
 ## 🌐 Web Service

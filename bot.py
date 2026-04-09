@@ -653,33 +653,230 @@ async def tmdb_query(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 # ──────────────────────────── BACKUP ────────────────────────────
-async def perform_backup(app: Application):
-    """Fetch all data and send as JSON files to BACKUP_CHAT_ID."""
+async def perform_backup(app: Application, target_chat_id: str | int | None = None) -> tuple[bool, str]:
+    """Fetch all data and send as JSON files to backup chat/channel."""
     global LAST_BACKUP_AT
-    if not BACKUP_CHAT_TARGET:
+    resolved_target = str(target_chat_id or BACKUP_CHAT_TARGET).strip()
+    if not resolved_target:
         logger.warning("Backup channel not set, skipping backup.")
-        return
+        return False, "Backup chat/channel is not configured."
     endpoints = {
         "movies.json":      "/api/movies",
         "series.json":      "/api/series",
         "collections.json": "/api/collections",
     }
     ts = datetime.now().strftime("%Y-%m-%d_%H-%M")
-    await app.bot.send_message(BACKUP_CHAT_TARGET, f"💾 *Auto-Backup* — {ts}", parse_mode=ParseMode.MARKDOWN)
+    try:
+        await app.bot.send_message(resolved_target, f"💾 *Auto-Backup* — {ts}", parse_mode=ParseMode.MARKDOWN)
+        for filename, path in endpoints.items():
+            data = await api_get(path)
+            if data is not None:
+                content = json.dumps(data, indent=2, ensure_ascii=False).encode()
+                fname   = f"{ts}_{filename}"
+                await app.bot.send_document(
+                    resolved_target,
+                    document=content,
+                    filename=fname,
+                    caption=f"📦 `{fname}`",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+        LAST_BACKUP_AT = datetime.now()
+        logger.info("Backup completed at %s and sent to %s", ts, resolved_target)
+        return True, resolved_target
+    except Exception as e:
+        logger.error("Backup failed for target %s: %s", resolved_target, e)
+        return False, str(e)
+
+async def collect_backup_payloads() -> dict[str, bytes]:
+    endpoints = {
+        "movies.json": "/api/movies",
+        "series.json": "/api/series",
+        "collections.json": "/api/collections",
+    }
+    payloads: dict[str, bytes] = {}
     for filename, path in endpoints.items():
         data = await api_get(path)
-        if data is not None:
-            content = json.dumps(data, indent=2, ensure_ascii=False).encode()
-            fname   = f"{ts}_{filename}"
-            await app.bot.send_document(
-                BACKUP_CHAT_TARGET,
-                document=content,
-                filename=fname,
-                caption=f"📦 `{fname}`",
-                parse_mode=ParseMode.MARKDOWN,
-            )
-    LAST_BACKUP_AT = datetime.now()
-    logger.info(f"Backup completed at {ts}")
+        if data is None:
+            raise RuntimeError(f"Unable to fetch {path}")
+        payloads[filename] = json.dumps(data, indent=2, ensure_ascii=False).encode()
+    return payloads
+
+async def create_backup_zip_bytes() -> tuple[bytes, str]:
+    payloads = await collect_backup_payloads()
+    ts = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for fname, content in payloads.items():
+            zf.writestr(f"{ts}_{fname}", content)
+    zip_buffer.seek(0)
+    return zip_buffer.read(), ts
+
+async def auto_ping_services():
+    global LAST_AUTO_PING_AT
+    targets = [("backend", BACKEND_URL)]
+    if BOT_WEB_URL:
+        targets.append(("bot", f"{BOT_WEB_URL}/health"))
+    try:
+        async with aiohttp.ClientSession() as s:
+            for name, url in targets:
+                try:
+                    async with s.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                        logger.info("Auto ping %s => %s (%s)", name, r.status, url)
+                except Exception as e:
+                    logger.warning("Auto ping failed for %s (%s): %s", name, url, e)
+    finally:
+        LAST_AUTO_PING_AT = datetime.now()
+
+async def web_health_handler(request: web.Request) -> web.Response:
+    now = datetime.now()
+    uptime = str((now - BOT_STARTED_AT)).split(".")[0]
+    backend_status = "offline"
+    backend_code = "N/A"
+    backend_latency = "N/A"
+    backend_latency_ms = 0.0
+    backend_error = ""
+    try:
+        start = datetime.now()
+        async with aiohttp.ClientSession() as s:
+            async with s.get(BACKEND_URL, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                backend_code = str(r.status)
+                backend_latency_ms = (datetime.now() - start).total_seconds() * 1000
+                backend_latency = f"{backend_latency_ms:.0f}ms"
+                backend_status = "online" if r.status == 200 else "degraded"
+    except Exception as exc:
+        backend_error = str(exc)
+
+    backup_text = LAST_BACKUP_AT.strftime("%Y-%m-%d %H:%M:%S") if LAST_BACKUP_AT else "Never"
+    ping_text = LAST_AUTO_PING_AT.strftime("%Y-%m-%d %H:%M:%S") if LAST_AUTO_PING_AT else "Never"
+    movies = await api_get("/api/movies") or []
+    series = await api_get("/api/series") or []
+    collections = await api_get("/api/collections") or {}
+    latency_width = min(max(int(backend_latency_ms / 10), 5), 100) if backend_latency_ms else 5
+    latency_color = "var(--ok)" if backend_latency_ms and backend_latency_ms < 400 else ("var(--warn)" if backend_latency_ms < 1000 else "var(--bad)")
+    html = f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SCFiles | System Health</title>
+    <style>
+      :root {{
+        --bg: #080c14; --card: #111b2d; --card-hover: #16243d; --border: #1f2a44;
+        --text: #f0f4f8; --muted: #8a9ab5; --ok: #10b981; --warn: #fbbf24; --bad: #ef4444;
+        --accent: #3b82f6; --accent-glow: rgba(59, 130, 246, 0.2);
+      }}
+      body {{
+        font-family: 'Inter', system-ui, -apple-system, sans-serif; max-width: 1000px;
+        margin: 0 auto; padding: 2rem 1rem; background: var(--bg); color: var(--text); line-height: 1.5;
+      }}
+      header {{ margin-bottom: 2.5rem; display: flex; justify-content: space-between; align-items: flex-end; }}
+      h1 {{ margin: 0; font-size: 1.8rem; letter-spacing: -0.5px; }}
+      .refresh-indicator {{ font-size: 0.8rem; color: var(--muted); display: flex; align-items: center; gap: 6px; }}
+      .pulse {{
+        width: 8px; height: 8px; background: var(--ok); border-radius: 50%;
+        box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); animation: pulse 2s infinite;
+      }}
+      @keyframes pulse {{
+        0% {{ transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); }}
+        70% {{ transform: scale(1); box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); }}
+        100% {{ transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }}
+      }}
+      .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; margin-bottom: 1.5rem; }}
+      .stats-grid {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 1.5rem; }}
+      .card {{
+        background: var(--card); border: 1px solid var(--border); border-radius: 16px;
+        padding: 1.25rem; transition: transform 0.2s ease, background 0.2s ease;
+      }}
+      .card:hover {{ background: var(--card-hover); }}
+      .kpi-label {{ color: var(--muted); font-size: 0.85rem; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px; }}
+      .kpi-value {{ font-size: 2rem; font-weight: 800; margin-top: 0.2rem; color: var(--accent); }}
+      h2 {{ font-size: 1.1rem; margin-top: 0; color: var(--muted); display: flex; align-items: center; gap: 8px; }}
+      .status-row {{ display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }}
+      .status-row:last-of-type {{ border-bottom: none; }}
+      .tag {{ font-family: monospace; padding: 2px 8px; border-radius: 6px; background: rgba(255,255,255,0.05); font-size: 0.9rem; }}
+      .btn-group {{ display: flex; gap: 12px; margin-top: 2rem; }}
+      .button {{ flex: 1; text-align: center; padding: 0.8rem; border-radius: 10px; font-weight: 600; text-decoration: none; transition: all 0.2s; border: 1px solid var(--accent); }}
+      .btn-primary {{ background: var(--accent); color: white; box-shadow: 0 4px 14px var(--accent-glow); }}
+      .btn-outline {{ color: var(--accent); }}
+      .button:hover {{ filter: brightness(1.1); transform: translateY(-1px); }}
+      .latency-bar {{ width: 100%; height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px; margin-top: 8px; overflow: hidden; }}
+      .latency-fill {{ height: 100%; }}
+      .ok {{ color: var(--ok); }} .warn {{ color: var(--warn); }} .bad {{ color: var(--bad); }} .muted {{ color: var(--muted); }}
+    </style>
+  </head>
+  <body>
+    <header>
+      <div>
+        <h1>SCFiles Bot Dashboard</h1>
+        <div class="refresh-indicator"><div class="pulse"></div>Live • Updated {now.strftime("%H:%M:%S")}</div>
+      </div>
+    </header>
+    <div class="stats-grid">
+      <div class="card"><div class="kpi-label">Movies</div><div class="kpi-value">{len(movies)}</div></div>
+      <div class="card"><div class="kpi-label">Series</div><div class="kpi-value">{len(series)}</div></div>
+      <div class="card"><div class="kpi-label">Collections</div><div class="kpi-value">{len(collections)}</div></div>
+    </div>
+    <div class="card">
+      <div class="grid">
+        <div class="card">
+          <h2><span>🤖</span> Bot Health</h2>
+          <div class="status-row"><span>Status</span><span class="ok" style="font-weight:bold; text-transform:uppercase">Online</span></div>
+          <div class="status-row"><span>Uptime</span><span class="tag">{uptime}</span></div>
+          <div class="status-row"><span>Last Backup</span><span class="muted">{backup_text}</span></div>
+          <div class="status-row"><span>Last Ping</span><span class="muted">{ping_text}</span></div>
+        </div>
+        <div class="card">
+          <h2><span>🌐</span> Backend Health</h2>
+          <div class="status-row"><span>Status</span><span class="{'ok' if backend_status == 'online' else 'warn' if backend_status == 'degraded' else 'bad'}" style="font-weight:bold; text-transform:uppercase">{backend_status}</span></div>
+          <div class="status-row"><span>Latency</span><span>{backend_latency}</span></div>
+          <div class="latency-bar"><div class="latency-fill" style="width: {latency_width}%; background: {latency_color};"></div></div>
+          <div class="status-row" style="margin-top:12px"><span>Response Code</span><span class="tag">{backend_code}</span></div>
+          <p class="muted" style="font-size:0.75rem; margin-top:10px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">URL: {BACKEND_URL}</p>
+        </div>
+      </div>
+    </div>
+    <div class="btn-group">
+      <a class="button btn-primary" href="/backup/all">📦 Backup Database</a>
+      <a class="button btn-outline" href="/health">🔍 JSON Raw Data</a>
+    </div>
+    <script>setTimeout(() => location.reload(), 60000);</script>
+  </body>
+</html>
+"""
+    return web.Response(text=html, content_type="text/html")
+
+async def web_json_health_handler(request: web.Request) -> web.Response:
+    now = datetime.now()
+    backend = {"status": "offline", "http_status": None, "latency_ms": None, "error": None}
+    try:
+        start = datetime.now()
+        async with aiohttp.ClientSession() as s:
+            async with s.get(BACKEND_URL, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                backend["http_status"] = r.status
+                backend["latency_ms"] = round((datetime.now() - start).total_seconds() * 1000, 2)
+                backend["status"] = "online" if r.status == 200 else "degraded"
+    except Exception as exc:
+        backend["error"] = str(exc)
+    return web.json_response({
+        "bot": {
+            "status": "online",
+            "uptime_seconds": int((now - BOT_STARTED_AT).total_seconds()),
+            "last_backup_at": LAST_BACKUP_AT.isoformat() if LAST_BACKUP_AT else None,
+            "last_auto_ping_at": LAST_AUTO_PING_AT.isoformat() if LAST_AUTO_PING_AT else None,
+        },
+        "backend": backend,
+        "time": now.isoformat(),
+    })
+
+async def web_backup_all_handler(request: web.Request) -> web.StreamResponse:
+    zip_bytes, ts = await create_backup_zip_bytes()
+    return web.Response(
+        body=zip_bytes,
+        headers={
+            "Content-Type": "application/zip",
+            "Content-Disposition": f'attachment; filename="backup_all_{ts}.zip"',
+        },
+    )
 
 async def collect_backup_payloads() -> dict[str, bytes]:
     endpoints = {
@@ -835,8 +1032,48 @@ async def cmd_backup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ Access denied.")
         return
     await update.message.reply_text("💾 Starting backup…")
-    await perform_backup(ctx.application)
-    await update.message.reply_text("✅ Backup sent!")
+    fallback_chat = str(update.effective_chat.id)
+    success, info = await perform_backup(ctx.application, target_chat_id=BACKUP_CHAT_TARGET or fallback_chat)
+    if success:
+        await update.message.reply_text(f"✅ Backup sent to `{info}`.", parse_mode=ParseMode.MARKDOWN)
+    else:
+        await update.message.reply_text(
+            f"❌ Backup failed: `{info}`\n\nSet/verify backup channel using `/setbackup <chat_id>`.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+
+async def cmd_backupall(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ Access denied.")
+        return
+    await update.message.reply_text("📦 Preparing backup ZIP…")
+    try:
+        zip_bytes, ts = await create_backup_zip_bytes()
+        await update.message.reply_document(
+            document=zip_bytes,
+            filename=f"backup_all_{ts}.zip",
+            caption="✅ Backup ZIP ready.",
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Failed to build ZIP backup.\n`{e}`", parse_mode=ParseMode.MARKDOWN)
+
+@admin_only
+async def cmd_setbackup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    global BACKUP_CHAT_TARGET
+    if not ctx.args:
+        current = BACKUP_CHAT_TARGET or "Not configured"
+        await update.message.reply_text(
+            f"📦 Current backup chat: `{current}`\n\nUsage:\n`/setbackup <chat_id>`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+    chat_id = ctx.args[0].strip()
+    BACKUP_CHAT_TARGET = chat_id
+    save_backup_chat_target(chat_id)
+    await update.message.reply_text(
+        f"✅ Backup chat updated to `{chat_id}`.\nAll auto/manual backups will use this chat.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
 
 async def cmd_backupall(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
@@ -889,8 +1126,11 @@ async def menu_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
     elif data == "menu_backup":
         await q.edit_message_text("💾 Running backup…")
-        await perform_backup(ctx.application)
-        await q.edit_message_text("✅ Backup done!")
+        success, info = await perform_backup(ctx.application, target_chat_id=BACKUP_CHAT_TARGET or str(q.message.chat_id))
+        if success:
+            await q.edit_message_text(f"✅ Backup sent to `{info}`.", parse_mode=ParseMode.MARKDOWN)
+        else:
+            await q.edit_message_text(f"❌ Backup failed: {info}")
     elif data == "menu_backup_all":
         await q.edit_message_text("📦 Building backup ZIP…")
         try:
