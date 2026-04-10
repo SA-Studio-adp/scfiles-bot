@@ -1,10 +1,10 @@
-# 🎛 SCFiles Backend Manager Bot
+# 🎛 SCFiles Backend Manager Bot v2 (Pyrogram Edition)
 
 A Telegram bot to fully manage your SCFiles backend — movies, series, collections — with TMDB metadata, automatic backups, server monitoring, and a built-in health web service.
 
 ---
 
-## ✅ Features
+## ✅ What Changed from v1
 
 | Feature | Details |
 |---|---|
@@ -28,20 +28,18 @@ A Telegram bot to fully manage your SCFiles backend — movies, series, collecti
 
 ## 🚀 Setup
 
-### 1. Install dependencies
+### 1. Get Pyrogram credentials
 
-```bash
-pip install -r requirements.txt
-```
+Go to **https://my.telegram.org/apps** and create an app to get:
+- `API_ID` (a number)
+- `API_HASH` (a hex string)
 
-### 2. Configure environment variables
+### 2. Configure environment
 
 ```bash
 cp .env.example .env
 # Edit .env with your values
 ```
-
-**Required variables:**
 
 | Variable | Description |
 |---|---|
@@ -56,39 +54,24 @@ cp .env.example .env
 | `AUTO_PING_INTERVAL_MIN` | Auto ping interval in minutes (default: `5`) |
 | `LOG_FILE` | Bot log file path used by `/logs` and `/logs` web endpoint (default: `bot.log`) |
 
-### 3. Run the bot
+### 3. Install & Run
 
 ```bash
-# Export variables from .env
+pip install -r requirements.txt
 export $(cat .env | xargs)
-
-# Start the bot
 python bot.py
+```
+
+### 4. Docker
+
+```bash
+docker build -t scfiles-bot .
+docker run -d --env-file .env -p 8080:8080 scfiles-bot
 ```
 
 ---
 
 ## 📱 Commands
-
-```
-/start         — Main menu with buttons
-/help          — Full command list
-/status        — Check backend server health
-/stats         — Movie/series/collection counts
-
-/movies        — List recent movies
-/series        — List recent series
-/collections   — List all collections
-
-/addmovie      — Add a movie (guided, with TMDB metadata)
-/addseries     — Add a series (with JSON episode input)
-/addcollection — Create a collection
-
-/editmovie     — Edit any field of a movie
-
-/delmovie      — Delete a movie by ID
-/delseries     — Delete a series by ID
-/delcollection — Delete a collection by ID
 
 /tmdb          — Search TMDB for movie or TV show metadata
 /backup        — Trigger a manual backup now
@@ -115,13 +98,13 @@ Use `BOT_WEB_URL` so the auto ping job can hit your bot deployment and help keep
 
 ---
 
-## 💾 Backup Format
+## 🌐 Web Dashboard (`:8080`)
 
-Every 2 days (or on `/backup`), the bot sends three files to `BACKUP_CHAT_ID`:
-
-- `YYYY-MM-DD_HH-MM_movies.json`
-- `YYYY-MM-DD_HH-MM_series.json`
-- `YYYY-MM-DD_HH-MM_collections.json`
+| Route | Description |
+|---|---|
+| `/` | Full HTML dashboard — KPIs, status panels, data tables |
+| `/health` | JSON health endpoint |
+| `/backup/all` | Download backup ZIP directly from browser |
 
 You can change the destination at runtime:
 
@@ -133,15 +116,20 @@ This value is persisted in `.backup_config.json` (configurable via `BACKUP_CONFI
 
 ---
 
-## 🔐 Getting Your Telegram User ID
+## 💾 Backup
 
-Send `/start` to [@userinfobot](https://t.me/userinfobot) on Telegram — it will reply with your numeric user ID.
+- **Auto:** Every 2 days, sends 3 JSON files to `BACKUP_CHAT_ID`
+- **Manual:** `/backup` — sends files to configured chat
+- **ZIP:** `/backupzip` — sends a single ZIP to current chat
+
+### Set backup channel at runtime:
+```
+/setbackup -100xxxxxxxxxx
+```
 
 ---
 
 ## 🔧 Add Series — Episode JSON Format
-
-When adding a series, paste this JSON structure:
 
 ```json
 [
