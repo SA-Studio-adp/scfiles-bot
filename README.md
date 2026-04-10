@@ -1,67 +1,60 @@
-# 🎛 SCFiles Backend Manager Bot
+# 🎛 SCFiles Backend Manager Bot v2 (Pyrogram Edition)
 
-A Telegram bot to fully manage your SCFiles backend — movies, series, collections — with TMDB metadata, automatic backups, server monitoring, and a built-in health web service.
+> Full rewrite using **Pyrogram** — fixes the `/backup` issue and adds a premium web dashboard.
 
 ---
 
-## ✅ Features
+## ✅ What Changed from v1
 
-| Feature | Details |
-|---|---|
-| 🌐 Server Status | Ping your backend, see response time & health |
-| 📊 Stats | Count of movies, series, collections |
-| 🎬 Movies | List, Add (with TMDB metadata), Edit, Delete |
-| 📺 Series | List, Add (JSON episode input), Delete |
-| 🗂 Collections | List, Add, Delete |
-| 🔍 TMDB Search | Search movies/TV shows, show poster + metadata |
-| 💾 Auto Backup | Every 2 days, sends JSON files to your Telegram chat |
-| 🧾 Backup All Download | Web service button to download all backend data in one ZIP |
-| 🩺 Health Web Service | Shows bot + backend health details in browser |
-| 🎨 Improved Web UI | Dashboard-style health page with auto refresh and DB counters |
-| 📡 Auto Pinging | Periodically pings backend and bot health URL to reduce sleeping |
-| 🤖 Auto Command Sync | Registers Telegram bot commands automatically on startup |
-| ⚙️ Backup Channel Setup | Configure backup target chat at runtime with `/setbackup` |
-| 🔐 Admin-only | Restrict write operations to specific user IDs |
+| Area | v1 (python-telegram-bot) | v2 (Pyrogram) |
+|---|---|---|
+| `/backup` command | ❌ Broken (send_document issues) | ✅ Fixed — uses Pyrogram's native file sending |
+| `/backupzip` | Worked sometimes | ✅ Reliable BytesIO ZIP send |
+| Bot framework | python-telegram-bot 21.x | **Pyrogram 2.x** |
+| Web dashboard | Basic HTML | ✅ Premium dark dashboard with tables |
+| State machine | PTB ConversationHandler | ✅ Custom in-memory state machine |
 
 ---
 
 ## 🚀 Setup
 
-### 1. Install dependencies
+### 1. Get Pyrogram credentials
 
-```bash
-pip install -r requirements.txt
-```
+Go to **https://my.telegram.org/apps** and create an app to get:
+- `API_ID` (a number)
+- `API_HASH` (a hex string)
 
-### 2. Configure environment variables
+### 2. Configure environment
 
 ```bash
 cp .env.example .env
 # Edit .env with your values
 ```
 
-**Required variables:**
-
 | Variable | Description |
 |---|---|
-| `TELEGRAM_TOKEN` | Bot token from [@BotFather](https://t.me/BotFather) |
-| `BACKEND_URL` | Your SCFiles backend URL (e.g. `https://your-app.vercel.app`) |
-| `TMDB_API_KEY` | API key from [themoviedb.org](https://www.themoviedb.org/settings/api) |
-| `ADMIN_IDS` | Comma-separated Telegram user IDs for admin access |
-| `BACKUP_CHAT_ID` | Chat/channel ID to receive automatic backups |
-| `WEB_HOST` | Host for the built-in health web service (default: `0.0.0.0`) |
-| `WEB_PORT` | Port for the web service (default: `8080`) |
-| `BOT_WEB_URL` | Public URL of this bot deployment for self-ping (example: `https://your-bot.onrender.com`) |
-| `AUTO_PING_INTERVAL_MIN` | Auto ping interval in minutes (default: `5`) |
+| `API_ID` | From my.telegram.org/apps |
+| `API_HASH` | From my.telegram.org/apps |
+| `TELEGRAM_TOKEN` | From [@BotFather](https://t.me/BotFather) |
+| `BACKEND_URL` | Your SCFiles Vercel URL |
+| `TMDB_API_KEY` | From [themoviedb.org](https://www.themoviedb.org/settings/api) |
+| `ADMIN_IDS` | Your Telegram user ID (from [@userinfobot](https://t.me/userinfobot)) |
+| `BACKUP_CHAT_ID` | Chat/channel ID for auto-backups |
+| `BOT_WEB_URL` | Public URL of this server (optional) |
 
-### 3. Run the bot
+### 3. Install & Run
 
 ```bash
-# Export variables from .env
+pip install -r requirements.txt
 export $(cat .env | xargs)
-
-# Start the bot
 python bot.py
+```
+
+### 4. Docker
+
+```bash
+docker build -t scfiles-bot .
+docker run -d --env-file .env -p 8080:8080 scfiles-bot
 ```
 
 ---
@@ -69,87 +62,58 @@ python bot.py
 ## 📱 Commands
 
 ```
-/start         — Main menu with buttons
-/help          — Full command list
-/status        — Check backend server health
-/stats         — Movie/series/collection counts
+/start          — Main menu
+/help           — Full command list
+/status         — Server health check
+/stats          — DB counts
 
-/movies        — List recent movies
-/series        — List recent series
-/collections   — List all collections
+/movies         — List recent movies
+/series         — List recent series
+/collections    — List all collections
 
-/addmovie      — Add a movie (guided, with TMDB metadata)
-/addseries     — Add a series (with JSON episode input)
-/addcollection — Create a collection
+/addmovie       — Add movie (guided flow + TMDB metadata)
+/addseries      — Add series (TMDB + JSON episode input)
+/addcollection  — Create collection
 
-/editmovie     — Edit any field of a movie
+/editmovie      — Edit any movie field
+/delmovie       — Delete a movie
+/delseries      — Delete a series
+/delcollection  — Delete a collection
 
-/delmovie      — Delete a movie by ID
-/delseries     — Delete a series by ID
-/delcollection — Delete a collection by ID
+/tmdb           — Search TMDB (movie or TV, shows poster)
+/backup         — Send JSON backups to configured channel
+/backupzip      — Download all data as a single ZIP
+/setbackup      — Change backup channel ID
 
-/tmdb          — Search TMDB for movie or TV show metadata
-/backup        — Trigger a manual backup now
-/backupall     — Download all backend data as one ZIP
-/setbackup     — Set backup channel/chat ID
-/cancel        — Cancel current operation
+/cancel         — Cancel current operation
 ```
 
-`/backup` now reports the exact destination chat ID and shows a setup hint if backup target is not configured.
+---
+
+## 🌐 Web Dashboard (`:8080`)
+
+| Route | Description |
+|---|---|
+| `/` | Full HTML dashboard — KPIs, status panels, data tables |
+| `/health` | JSON health endpoint |
+| `/backup/all` | Download backup ZIP directly from browser |
 
 ---
 
-## 🌐 Web Service
+## 💾 Backup
 
-The bot also starts a small web service:
+- **Auto:** Every 2 days, sends 3 JSON files to `BACKUP_CHAT_ID`
+- **Manual:** `/backup` — sends files to configured chat
+- **ZIP:** `/backupzip` — sends a single ZIP to current chat
 
-- `/` → HTML dashboard with bot/backend health + movie/series/collection counters
-- `/health` → JSON health payload
-- `/backup/all` → Download one ZIP with movies, series, and collections JSON
-
-Use `BOT_WEB_URL` so the auto ping job can hit your bot deployment and help keep it awake.
-
----
-
-## 🌐 Web Service
-
-The bot also starts a small web service:
-
-- `/` → HTML dashboard with bot/backend health + movie/series/collection counters
-- `/health` → JSON health payload
-- `/backup/all` → Download one ZIP with movies, series, and collections JSON
-
-Use `BOT_WEB_URL` so the auto ping job can hit your bot deployment and help keep it awake.
-
----
-
-## 💾 Backup Format
-
-Every 2 days (or on `/backup`), the bot sends three files to `BACKUP_CHAT_ID`:
-
-- `YYYY-MM-DD_HH-MM_movies.json`
-- `YYYY-MM-DD_HH-MM_series.json`
-- `YYYY-MM-DD_HH-MM_collections.json`
-
-You can change the destination at runtime:
-
-```bash
-/setbackup <chat_id>
+### Set backup channel at runtime:
 ```
-
-This value is persisted in `.backup_config.json` (configurable via `BACKUP_CONFIG_FILE`).
-
----
-
-## 🔐 Getting Your Telegram User ID
-
-Send `/start` to [@userinfobot](https://t.me/userinfobot) on Telegram — it will reply with your numeric user ID.
+/setbackup -100xxxxxxxxxx
+```
 
 ---
 
 ## 🔧 Add Series — Episode JSON Format
-
-When adding a series, paste this JSON structure:
 
 ```json
 [
@@ -168,29 +132,3 @@ When adding a series, paste this JSON structure:
   }
 ]
 ```
-
----
-
-## 🐳 Run with Docker (optional)
-
-```dockerfile
-FROM python:3.11-slim
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    WEB_HOST=0.0.0.0 \
-    WEB_PORT=8080
-WORKDIR /app
-COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
-COPY bot.py /app/bot.py
-EXPOSE 8080
-CMD ["python", "bot.py"]
-```
-
-```bash
-docker build -t scfiles-bot .
-docker run -d --env-file .env scfiles-bot
-```
-
-The container exposes port `8080` for the health web service (`/`, `/health`, `/backup/all`).
