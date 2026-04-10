@@ -1,6 +1,6 @@
 # 🎛 SCFiles Backend Manager Bot
 
-A Telegram bot to fully manage your SCFiles backend — movies, series, collections — with TMDB metadata, automatic backups, and server monitoring.
+A Telegram bot to fully manage your SCFiles backend — movies, series, collections — with TMDB metadata, automatic backups, server monitoring, and a built-in health web service.
 
 ---
 
@@ -15,6 +15,13 @@ A Telegram bot to fully manage your SCFiles backend — movies, series, collecti
 | 🗂 Collections | List, Add, Delete |
 | 🔍 TMDB Search | Search movies/TV shows, show poster + metadata |
 | 💾 Auto Backup | Every 2 days, sends JSON files to your Telegram chat |
+| 🧾 Backup All Download | Web service button to download all backend data in one ZIP |
+| 🩺 Health Web Service | Shows bot + backend health details in browser |
+| 🎨 Improved Web UI | Dashboard-style health page with auto refresh and DB counters |
+| 📡 Auto Pinging | Periodically pings backend and bot health URL to reduce sleeping |
+| 🤖 Auto Command Sync | Registers Telegram bot commands automatically on startup |
+| ⚙️ Backup Channel Setup | Configure backup target chat at runtime with `/setbackup` |
+| 📋 Runtime Logs | `/logs` command + `/logs` web endpoint for recent log tail |
 | 🔐 Admin-only | Restrict write operations to specific user IDs |
 
 ---
@@ -43,6 +50,11 @@ cp .env.example .env
 | `TMDB_API_KEY` | API key from [themoviedb.org](https://www.themoviedb.org/settings/api) |
 | `ADMIN_IDS` | Comma-separated Telegram user IDs for admin access |
 | `BACKUP_CHAT_ID` | Chat/channel ID to receive automatic backups |
+| `WEB_HOST` | Host for the built-in health web service (default: `0.0.0.0`) |
+| `WEB_PORT` | Port for the web service (default: `8080`) |
+| `BOT_WEB_URL` | Public URL of this bot deployment for self-ping (example: `https://your-bot.onrender.com`) |
+| `AUTO_PING_INTERVAL_MIN` | Auto ping interval in minutes (default: `5`) |
+| `LOG_FILE` | Bot log file path used by `/logs` and `/logs` web endpoint (default: `bot.log`) |
 
 ### 3. Run the bot
 
@@ -80,8 +92,26 @@ python bot.py
 
 /tmdb          — Search TMDB for movie or TV show metadata
 /backup        — Trigger a manual backup now
+/backupall     — Download all backend data as one ZIP
+/setbackup     — Set backup channel/chat ID
+/logs          — Download recent bot logs
 /cancel        — Cancel current operation
 ```
+
+`/backup` now reports the exact destination chat ID and shows a setup hint if backup target is not configured.
+
+---
+
+## 🌐 Web Service
+
+The bot also starts a small web service:
+
+- `/` → HTML dashboard with bot/backend health + movie/series/collection counters
+- `/health` → JSON health payload
+- `/backup/all` → Download one ZIP with movies, series, and collections JSON
+- `/logs` → View latest bot log tail in browser
+
+Use `BOT_WEB_URL` so the auto ping job can hit your bot deployment and help keep it awake.
 
 ---
 
@@ -92,6 +122,14 @@ Every 2 days (or on `/backup`), the bot sends three files to `BACKUP_CHAT_ID`:
 - `YYYY-MM-DD_HH-MM_movies.json`
 - `YYYY-MM-DD_HH-MM_series.json`
 - `YYYY-MM-DD_HH-MM_collections.json`
+
+You can change the destination at runtime:
+
+```bash
+/setbackup <chat_id>
+```
+
+This value is persisted in `.backup_config.json` (configurable via `BACKUP_CONFIG_FILE`).
 
 ---
 
@@ -129,10 +167,16 @@ When adding a series, paste this JSON structure:
 
 ```dockerfile
 FROM python:3.11-slim
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    WEB_HOST=0.0.0.0 \
+    WEB_PORT=8080
 WORKDIR /app
-COPY requirements.txt .
-RUN pip install -r requirements.txt
-COPY bot.py .
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
+COPY bot.py /app/bot.py
+EXPOSE 8080
 CMD ["python", "bot.py"]
 ```
 
@@ -140,3 +184,5 @@ CMD ["python", "bot.py"]
 docker build -t scfiles-bot .
 docker run -d --env-file .env scfiles-bot
 ```
+
+The container exposes port `8080` for the health web service (`/`, `/health`, `/backup/all`).

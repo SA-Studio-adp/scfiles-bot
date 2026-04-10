@@ -6,40 +6,79 @@ with TMDB metadata, backup, and web service monitoring.
 
 import os
 import json
-import asyncio
+import io
 import logging
+import zipfile
 import aiohttp
-import aiofiles
 from datetime import datetime, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from aiohttp import web
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, ConversationHandler, ContextTypes, filters
 )
 from telegram.constants import ParseMode
+from telegram.helpers import escape_markdown
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
+LOG_FILE = os.environ.get("LOG_FILE", "bot.log")
+_log_format = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    _stream_handler = logging.StreamHandler()
+    _stream_handler.setFormatter(logging.Formatter(_log_format))
+    _file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
+    _file_handler.setFormatter(logging.Formatter(_log_format))
+    logger.addHandler(_stream_handler)
+    logger.addHandler(_file_handler)
 
 # ──────────────────────────── CONFIG ────────────────────────────
 TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
 BACKEND_URL      = os.environ["BACKEND_URL"].rstrip("/")
 TMDB_API_KEY     = os.environ["TMDB_API_KEY"]
 ADMIN_IDS        = [int(x) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip()]
-BACKUP_CHAT_ID   = os.environ.get("BACKUP_CHAT_ID", "")      # chat/channel to send backups to
+BACKUP_CHAT_ID   = os.environ.get("BACKUP_CHAT_ID", "")      # legacy fallback
+BACKUP_CONFIG_FILE = os.environ.get("BACKUP_CONFIG_FILE", ".backup_config.json")
+WEB_HOST         = os.environ.get("WEB_HOST", "0.0.0.0")
+WEB_PORT         = int(os.environ.get("WEB_PORT", "8080"))
+BOT_WEB_URL      = os.environ.get("BOT_WEB_URL", "").rstrip("/")
+AUTO_PING_INTERVAL_MIN = int(os.environ.get("AUTO_PING_INTERVAL_MIN", "5"))
 
 TMDB_BASE        = "https://api.themoviedb.org/3"
 TMDB_IMG         = "https://image.tmdb.org/t/p/w500"
+BOT_STARTED_AT   = datetime.now()
+LAST_BACKUP_AT   = None
+LAST_AUTO_PING_AT = None
+BACKUP_CHAT_TARGET = BACKUP_CHAT_ID
+BOT_COMMANDS = [
+    ("start", "Main menu"),
+    ("help", "Show available commands"),
+    ("status", "Bot + backend health details"),
+    ("stats", "Database statistics"),
+    ("movies", "List recent movies"),
+    ("series", "List recent series"),
+    ("collections", "List collections"),
+    ("addmovie", "Add a movie (admin)"),
+    ("addseries", "Add a series (admin)"),
+    ("addcollection", "Add a collection (admin)"),
+    ("editmovie", "Edit a movie field (admin)"),
+    ("delmovie", "Delete a movie (admin)"),
+    ("delseries", "Delete a series (admin)"),
+    ("delcollection", "Delete a collection (admin)"),
+    ("tmdb", "Search TMDB metadata (admin)"),
+    ("backup", "Run manual backup (admin)"),
+    ("backupall", "Download all data as ZIP (admin)"),
+    ("setbackup", "Set backup channel/chat ID (admin)"),
+    ("logs", "Get recent bot logs (admin)"),
+    ("cancel", "Cancel current operation"),
+]
 
 # ──────────────────────────── STATES ────────────────────────────
 (
     ADD_MOVIE_TMDB, ADD_MOVIE_EXTRA, ADD_MOVIE_DL480, ADD_MOVIE_DL720,
     ADD_MOVIE_DL1080, ADD_MOVIE_CONFIRM,
-    ADD_SERIES_TMDB, ADD_SERIES_SEASON, ADD_SERIES_EPISODES, ADD_SERIES_CONFIRM,
+    ADD_SERIES_TMDB, ADD_SERIES_EPISODES, ADD_SERIES_CONFIRM,
     ADD_COL_ID, ADD_COL_NAME, ADD_COL_BANNER, ADD_COL_CONFIRM,
     DEL_MOVIE_ID, DEL_SERIES_ID, DEL_COL_ID,
     SEARCH_TMDB_Q, SEARCH_TYPE,
@@ -166,8 +205,11 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
          InlineKeyboardButton("🔍 TMDB Search", callback_data="menu_tmdb")],
         [InlineKeyboardButton("📊 Stats", callback_data="menu_stats"),
          InlineKeyboardButton("🌐 Server Status", callback_data="menu_status")],
-        [InlineKeyboardButton("💾 Backup Now", callback_data="menu_backup")],
+        [InlineKeyboardButton("💾 Backup Now", callback_data="menu_backup"),
+         InlineKeyboardButton("📥 Backup All ZIP", callback_data="menu_backup_all")],
     ]
+    if BOT_WEB_URL:
+        kb.append([InlineKeyboardButton("🩺 Open Web Dashboard", url=BOT_WEB_URL)])
     await update.message.reply_text(
         "🎛 *SCFiles Backend Manager*\n\nChoose an action:",
         reply_markup=InlineKeyboardMarkup(kb),
@@ -175,47 +217,76 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    text = (
-        "📖 *Available Commands*\n\n"
-        "/start — Main menu\n"
-        "/status — Check server health\n"
-        "/stats — Database statistics\n"
-        "/movies — List recent movies\n"
-        "/series — List recent series\n"
-        "/collections — List collections\n"
-        "/addmovie — Add a movie\n"
-        "/addseries — Add a series\n"
-        "/addcollection — Add a collection\n"
-        "/delmovie — Delete a movie by ID\n"
-        "/delseries — Delete a series by ID\n"
-        "/delcollection — Delete a collection by ID\n"
-        "/editmovie — Edit a movie field\n"
-        "/tmdb — Search TMDB metadata\n"
-        "/backup — Trigger manual backup\n"
-        "/cancel — Cancel current operation\n"
-    )
+    lines = [f"/{name} — {description}" for name, description in BOT_COMMANDS]
+    text = "📖 *Available Commands*\n\n" + "\n".join(lines)
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+async def register_bot_commands(application: Application):
+    await application.bot.set_my_commands(
+        [BotCommand(command=name, description=description[:256]) for name, description in BOT_COMMANDS]
+    )
+    logger.info("Registered %s bot commands with Telegram.", len(BOT_COMMANDS))
+
+def read_log_tail(limit_bytes: int = 32_768) -> bytes:
+    if not os.path.exists(LOG_FILE):
+        return b""
+    with open(LOG_FILE, "rb") as fp:
+        fp.seek(0, os.SEEK_END)
+        size = fp.tell()
+        fp.seek(max(0, size - limit_bytes))
+        return fp.read()
+
+def load_backup_chat_target() -> str:
+    if os.path.exists(BACKUP_CONFIG_FILE):
+        try:
+            with open(BACKUP_CONFIG_FILE, "r", encoding="utf-8") as fp:
+                data = json.load(fp)
+                val = str(data.get("backup_chat_id", "")).strip()
+                if val:
+                    return val
+        except Exception as e:
+            logger.warning("Failed to load %s: %s", BACKUP_CONFIG_FILE, e)
+    return str(BACKUP_CHAT_ID).strip()
+
+def save_backup_chat_target(chat_id: str):
+    with open(BACKUP_CONFIG_FILE, "w", encoding="utf-8") as fp:
+        json.dump({"backup_chat_id": str(chat_id)}, fp, indent=2)
 
 # ──────────────────────────── SERVER STATUS ────────────────────────────
 async def check_status(update_or_query, is_query=False):
     send = update_or_query.edit_message_text if is_query else update_or_query.message.reply_text
+    now = datetime.now()
+    uptime = now - BOT_STARTED_AT
+    bot_health = "🟢 Online"
     try:
-        start = datetime.now()
+        start = now
         async with aiohttp.ClientSession() as s:
             async with s.get(BACKEND_URL, timeout=aiohttp.ClientTimeout(total=10)) as r:
                 elapsed = (datetime.now() - start).total_seconds() * 1000
                 status  = "🟢 Online" if r.status == 200 else f"🟡 Status {r.status}"
-                body    = await r.text()
+                body    = escape_markdown((await r.text())[:80], version=2)
                 msg     = (
-                    f"*Server Status*\n\n"
-                    f"{status}\n"
-                    f"🔗 `{BACKEND_URL}`\n"
+                    f"*Health Details*\n\n"
+                    f"🤖 Bot: {bot_health}\n"
+                    f"⏱ Bot Uptime: `{escape_markdown(str(uptime).split('.')[0], version=2)}`\n\n"
+                    f"🖥 Backend: {status}\n"
+                    f"🔗 `{escape_markdown(BACKEND_URL, version=2)}`\n"
                     f"⚡ Response: `{elapsed:.0f}ms`\n"
-                    f"📨 Body: `{body[:80]}`"
+                    f"📨 Body: `{body[:80]}`\n"
+                    f"🕐 Checked: `{escape_markdown(now.strftime('%Y-%m-%d %H:%M:%S'), version=2)}`"
                 )
     except Exception as e:
-        msg = f"🔴 *Server Offline*\n\n`{e}`"
-    await send(msg, parse_mode=ParseMode.MARKDOWN)
+        err = escape_markdown(str(e), version=2)
+        msg = (
+            f"*Health Details*\n\n"
+            f"🤖 Bot: {bot_health}\n"
+            f"⏱ Bot Uptime: `{escape_markdown(str(uptime).split('.')[0], version=2)}`\n\n"
+            f"🖥 Backend: 🔴 Offline\n"
+            f"🔗 `{escape_markdown(BACKEND_URL, version=2)}`\n"
+            f"❗ Error: `{err}`\n"
+            f"🕐 Checked: `{escape_markdown(now.strftime('%Y-%m-%d %H:%M:%S'), version=2)}`"
+        )
+    await send(msg, parse_mode=ParseMode.MARKDOWN_V2)
 
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await check_status(update)
@@ -598,39 +669,304 @@ async def tmdb_query(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 # ──────────────────────────── BACKUP ────────────────────────────
-async def perform_backup(app: Application):
-    """Fetch all data and send as JSON files to BACKUP_CHAT_ID."""
-    if not BACKUP_CHAT_ID:
-        logger.warning("BACKUP_CHAT_ID not set, skipping backup.")
-        return
+async def perform_backup(app: Application, target_chat_id: str | int | None = None) -> tuple[bool, str]:
+    """Fetch all data and send as JSON files to backup chat/channel."""
+    global LAST_BACKUP_AT
+    resolved_target = str(target_chat_id or BACKUP_CHAT_TARGET).strip()
+    if not resolved_target:
+        logger.warning("Backup channel not set, skipping backup.")
+        return False, "Backup chat/channel is not configured."
     endpoints = {
         "movies.json":      "/api/movies",
         "series.json":      "/api/series",
         "collections.json": "/api/collections",
     }
     ts = datetime.now().strftime("%Y-%m-%d_%H-%M")
-    await app.bot.send_message(BACKUP_CHAT_ID, f"💾 *Auto-Backup* — {ts}", parse_mode=ParseMode.MARKDOWN)
+    try:
+        await app.bot.send_message(resolved_target, f"💾 *Auto-Backup* — {ts}", parse_mode=ParseMode.MARKDOWN)
+        for filename, path in endpoints.items():
+            data = await api_get(path)
+            if data is not None:
+                content = json.dumps(data, indent=2, ensure_ascii=False).encode()
+                fname   = f"{ts}_{filename}"
+                await app.bot.send_document(
+                    resolved_target,
+                    document=content,
+                    filename=fname,
+                    caption=f"📦 `{fname}`",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+        LAST_BACKUP_AT = datetime.now()
+        logger.info("Backup completed at %s and sent to %s", ts, resolved_target)
+        return True, resolved_target
+    except Exception as e:
+        logger.error("Backup failed for target %s: %s", resolved_target, e)
+        return False, str(e)
+
+async def collect_backup_payloads() -> dict[str, bytes]:
+    endpoints = {
+        "movies.json": "/api/movies",
+        "series.json": "/api/series",
+        "collections.json": "/api/collections",
+    }
+    payloads: dict[str, bytes] = {}
     for filename, path in endpoints.items():
         data = await api_get(path)
-        if data is not None:
-            content = json.dumps(data, indent=2, ensure_ascii=False).encode()
-            fname   = f"{ts}_{filename}"
-            await app.bot.send_document(
-                BACKUP_CHAT_ID,
-                document=content,
-                filename=fname,
-                caption=f"📦 `{fname}`",
-                parse_mode=ParseMode.MARKDOWN,
-            )
-    logger.info(f"Backup completed at {ts}")
+        if data is None:
+            raise RuntimeError(f"Unable to fetch {path}")
+        payloads[filename] = json.dumps(data, indent=2, ensure_ascii=False).encode()
+    return payloads
+
+async def create_backup_zip_bytes() -> tuple[bytes, str]:
+    payloads = await collect_backup_payloads()
+    ts = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for fname, content in payloads.items():
+            zf.writestr(f"{ts}_{fname}", content)
+    zip_buffer.seek(0)
+    return zip_buffer.read(), ts
+
+async def auto_ping_services():
+    global LAST_AUTO_PING_AT
+    targets = [("backend", BACKEND_URL)]
+    if BOT_WEB_URL:
+        targets.append(("bot", f"{BOT_WEB_URL}/health"))
+    try:
+        async with aiohttp.ClientSession() as s:
+            for name, url in targets:
+                try:
+                    async with s.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                        logger.info("Auto ping %s => %s (%s)", name, r.status, url)
+                except Exception as e:
+                    logger.warning("Auto ping failed for %s (%s): %s", name, url, e)
+    finally:
+        LAST_AUTO_PING_AT = datetime.now()
+
+async def web_health_handler(request: web.Request) -> web.Response:
+    now = datetime.now()
+    uptime = str((now - BOT_STARTED_AT)).split(".")[0]
+    backend_status = "offline"
+    backend_code = "N/A"
+    backend_latency = "N/A"
+    backend_latency_ms = 0.0
+    backend_error = ""
+    try:
+        start = datetime.now()
+        async with aiohttp.ClientSession() as s:
+            async with s.get(BACKEND_URL, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                backend_code = str(r.status)
+                backend_latency_ms = (datetime.now() - start).total_seconds() * 1000
+                backend_latency = f"{backend_latency_ms:.0f}ms"
+                backend_status = "online" if r.status == 200 else "degraded"
+    except Exception as exc:
+        backend_error = str(exc)
+
+    backup_text = LAST_BACKUP_AT.strftime("%Y-%m-%d %H:%M:%S") if LAST_BACKUP_AT else "Never"
+    ping_text = LAST_AUTO_PING_AT.strftime("%Y-%m-%d %H:%M:%S") if LAST_AUTO_PING_AT else "Never"
+    movies = await api_get("/api/movies") or []
+    series = await api_get("/api/series") or []
+    collections = await api_get("/api/collections") or {}
+    latency_width = min(max(int(backend_latency_ms / 10), 5), 100) if backend_latency_ms else 5
+    latency_color = "var(--ok)" if backend_latency_ms and backend_latency_ms < 400 else ("var(--warn)" if backend_latency_ms < 1000 else "var(--bad)")
+    html = f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SCFiles | System Health</title>
+    <style>
+      :root {{
+        --bg: #080c14; --card: #111b2d; --card-hover: #16243d; --border: #1f2a44;
+        --text: #f0f4f8; --muted: #8a9ab5; --ok: #10b981; --warn: #fbbf24; --bad: #ef4444;
+        --accent: #3b82f6; --accent-glow: rgba(59, 130, 246, 0.2);
+      }}
+      body {{
+        font-family: 'Inter', system-ui, -apple-system, sans-serif; max-width: 1000px;
+        margin: 0 auto; padding: 2rem 1rem; background: var(--bg); color: var(--text); line-height: 1.5;
+      }}
+      header {{ margin-bottom: 2.5rem; display: flex; justify-content: space-between; align-items: flex-end; }}
+      h1 {{ margin: 0; font-size: 1.8rem; letter-spacing: -0.5px; }}
+      .refresh-indicator {{ font-size: 0.8rem; color: var(--muted); display: flex; align-items: center; gap: 6px; }}
+      .pulse {{
+        width: 8px; height: 8px; background: var(--ok); border-radius: 50%;
+        box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); animation: pulse 2s infinite;
+      }}
+      @keyframes pulse {{
+        0% {{ transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); }}
+        70% {{ transform: scale(1); box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); }}
+        100% {{ transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }}
+      }}
+      .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; margin-bottom: 1.5rem; }}
+      .stats-grid {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 1.5rem; }}
+      .card {{
+        background: var(--card); border: 1px solid var(--border); border-radius: 16px;
+        padding: 1.25rem; transition: transform 0.2s ease, background 0.2s ease;
+      }}
+      .card:hover {{ background: var(--card-hover); }}
+      .kpi-label {{ color: var(--muted); font-size: 0.85rem; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px; }}
+      .kpi-value {{ font-size: 2rem; font-weight: 800; margin-top: 0.2rem; color: var(--accent); }}
+      h2 {{ font-size: 1.1rem; margin-top: 0; color: var(--muted); display: flex; align-items: center; gap: 8px; }}
+      .status-row {{ display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }}
+      .status-row:last-of-type {{ border-bottom: none; }}
+      .tag {{ font-family: monospace; padding: 2px 8px; border-radius: 6px; background: rgba(255,255,255,0.05); font-size: 0.9rem; }}
+      .btn-group {{ display: flex; gap: 12px; margin-top: 2rem; }}
+      .button {{ flex: 1; text-align: center; padding: 0.8rem; border-radius: 10px; font-weight: 600; text-decoration: none; transition: all 0.2s; border: 1px solid var(--accent); }}
+      .btn-primary {{ background: var(--accent); color: white; box-shadow: 0 4px 14px var(--accent-glow); }}
+      .btn-outline {{ color: var(--accent); }}
+      .button:hover {{ filter: brightness(1.1); transform: translateY(-1px); }}
+      .latency-bar {{ width: 100%; height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px; margin-top: 8px; overflow: hidden; }}
+      .latency-fill {{ height: 100%; }}
+      .ok {{ color: var(--ok); }} .warn {{ color: var(--warn); }} .bad {{ color: var(--bad); }} .muted {{ color: var(--muted); }}
+    </style>
+  </head>
+  <body>
+    <header>
+      <div>
+        <h1>SCFiles Bot Dashboard</h1>
+        <div class="refresh-indicator"><div class="pulse"></div>Live • Updated {now.strftime("%H:%M:%S")}</div>
+      </div>
+    </header>
+    <div class="stats-grid">
+      <div class="card"><div class="kpi-label">Movies</div><div class="kpi-value">{len(movies)}</div></div>
+      <div class="card"><div class="kpi-label">Series</div><div class="kpi-value">{len(series)}</div></div>
+      <div class="card"><div class="kpi-label">Collections</div><div class="kpi-value">{len(collections)}</div></div>
+    </div>
+    <div class="card">
+      <div class="grid">
+        <div class="card">
+          <h2><span>🤖</span> Bot Health</h2>
+          <div class="status-row"><span>Status</span><span class="ok" style="font-weight:bold; text-transform:uppercase">Online</span></div>
+          <div class="status-row"><span>Uptime</span><span class="tag">{uptime}</span></div>
+          <div class="status-row"><span>Last Backup</span><span class="muted">{backup_text}</span></div>
+          <div class="status-row"><span>Last Ping</span><span class="muted">{ping_text}</span></div>
+        </div>
+        <div class="card">
+          <h2><span>🌐</span> Backend Health</h2>
+          <div class="status-row"><span>Status</span><span class="{'ok' if backend_status == 'online' else 'warn' if backend_status == 'degraded' else 'bad'}" style="font-weight:bold; text-transform:uppercase">{backend_status}</span></div>
+          <div class="status-row"><span>Latency</span><span>{backend_latency}</span></div>
+          <div class="latency-bar"><div class="latency-fill" style="width: {latency_width}%; background: {latency_color};"></div></div>
+          <div class="status-row" style="margin-top:12px"><span>Response Code</span><span class="tag">{backend_code}</span></div>
+          <p class="muted" style="font-size:0.75rem; margin-top:10px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">URL: {BACKEND_URL}</p>
+        </div>
+      </div>
+    </div>
+    <div class="btn-group">
+      <a class="button btn-primary" href="/backup/all">📦 Backup Database</a>
+      <a class="button btn-outline" href="/logs">📋 View Logs</a>
+      <a class="button btn-outline" href="/health">🔍 JSON Raw Data</a>
+    </div>
+    <script>setTimeout(() => location.reload(), 60000);</script>
+  </body>
+</html>
+"""
+    return web.Response(text=html, content_type="text/html")
+
+async def web_json_health_handler(request: web.Request) -> web.Response:
+    now = datetime.now()
+    backend = {"status": "offline", "http_status": None, "latency_ms": None, "error": None}
+    try:
+        start = datetime.now()
+        async with aiohttp.ClientSession() as s:
+            async with s.get(BACKEND_URL, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                backend["http_status"] = r.status
+                backend["latency_ms"] = round((datetime.now() - start).total_seconds() * 1000, 2)
+                backend["status"] = "online" if r.status == 200 else "degraded"
+    except Exception as exc:
+        backend["error"] = str(exc)
+    return web.json_response({
+        "bot": {
+            "status": "online",
+            "uptime_seconds": int((now - BOT_STARTED_AT).total_seconds()),
+            "last_backup_at": LAST_BACKUP_AT.isoformat() if LAST_BACKUP_AT else None,
+            "last_auto_ping_at": LAST_AUTO_PING_AT.isoformat() if LAST_AUTO_PING_AT else None,
+        },
+        "backend": backend,
+        "time": now.isoformat(),
+    })
+
+async def web_backup_all_handler(request: web.Request) -> web.StreamResponse:
+    zip_bytes, ts = await create_backup_zip_bytes()
+    return web.Response(
+        body=zip_bytes,
+        headers={
+            "Content-Type": "application/zip",
+            "Content-Disposition": f'attachment; filename="backup_all_{ts}.zip"',
+        },
+    )
+
+async def web_logs_handler(request: web.Request) -> web.StreamResponse:
+    tail = read_log_tail()
+    if not tail:
+        return web.Response(text="No logs available yet.", content_type="text/plain")
+    return web.Response(
+        body=tail,
+        headers={
+            "Content-Type": "text/plain; charset=utf-8",
+            "Content-Disposition": 'inline; filename="bot.log"',
+        },
+    )
 
 async def cmd_backup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ Access denied.")
         return
     await update.message.reply_text("💾 Starting backup…")
-    await perform_backup(ctx.application)
-    await update.message.reply_text("✅ Backup sent!")
+    fallback_chat = str(update.effective_chat.id)
+    success, info = await perform_backup(ctx.application, target_chat_id=BACKUP_CHAT_TARGET or fallback_chat)
+    if success:
+        await update.message.reply_text(f"✅ Backup sent to `{info}`.", parse_mode=ParseMode.MARKDOWN)
+    else:
+        await update.message.reply_text(
+            f"❌ Backup failed: `{info}`\n\nSet/verify backup channel using `/setbackup <chat_id>`.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+
+async def cmd_backupall(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ Access denied.")
+        return
+    await update.message.reply_text("📦 Preparing backup ZIP…")
+    try:
+        zip_bytes, ts = await create_backup_zip_bytes()
+        await update.message.reply_document(
+            document=zip_bytes,
+            filename=f"backup_all_{ts}.zip",
+            caption="✅ Backup ZIP ready.",
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Failed to build ZIP backup.\n`{e}`", parse_mode=ParseMode.MARKDOWN)
+
+@admin_only
+async def cmd_setbackup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    global BACKUP_CHAT_TARGET
+    if not ctx.args:
+        current = BACKUP_CHAT_TARGET or "Not configured"
+        await update.message.reply_text(
+            f"📦 Current backup chat: `{current}`\n\nUsage:\n`/setbackup <chat_id>`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+    chat_id = ctx.args[0].strip()
+    BACKUP_CHAT_TARGET = chat_id
+    save_backup_chat_target(chat_id)
+    await update.message.reply_text(
+        f"✅ Backup chat updated to `{chat_id}`.\nAll auto/manual backups will use this chat.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+@admin_only
+async def cmd_logs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    tail = read_log_tail()
+    if not tail:
+        await update.message.reply_text("📭 No logs available yet.")
+        return
+    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    await update.message.reply_document(
+        document=tail,
+        filename=f"bot_logs_{ts}.txt",
+        caption=f"📋 Last {max(1, len(tail)//1024)}KB logs",
+    )
 
 # ──────────────────────────── CALLBACK ROUTER ────────────────────────────
 async def menu_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -650,8 +986,23 @@ async def menu_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
     elif data == "menu_backup":
         await q.edit_message_text("💾 Running backup…")
-        await perform_backup(ctx.application)
-        await q.edit_message_text("✅ Backup done!")
+        success, info = await perform_backup(ctx.application, target_chat_id=BACKUP_CHAT_TARGET or str(q.message.chat_id))
+        if success:
+            await q.edit_message_text(f"✅ Backup sent to `{info}`.", parse_mode=ParseMode.MARKDOWN)
+        else:
+            await q.edit_message_text(f"❌ Backup failed: {info}")
+    elif data == "menu_backup_all":
+        await q.edit_message_text("📦 Building backup ZIP…")
+        try:
+            zip_bytes, ts = await create_backup_zip_bytes()
+            await q.message.reply_document(
+                document=zip_bytes,
+                filename=f"backup_all_{ts}.zip",
+                caption="✅ Backup ZIP is ready.",
+            )
+            await q.edit_message_text("✅ Backup ZIP sent.")
+        except Exception as e:
+            await q.edit_message_text(f"❌ Could not build backup ZIP: {e}")
     elif data == "menu_movies":
         movies = await api_get("/api/movies?limit=10") or []
         lines  = [f"• `{m['id']}` | TMDB `{m.get('tmdb_id','?')}`" for m in movies[:10]]
@@ -673,9 +1024,18 @@ async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Operation cancelled.")
     return ConversationHandler.END
 
+async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE):
+    logger.error("Unhandled bot error: %s", ctx.error)
+    if update and isinstance(update, Update) and update.effective_message:
+        try:
+            await update.effective_message.reply_text("⚠️ Something went wrong. Please try again.")
+        except Exception:
+            pass
+
 # ──────────────────────────── MAIN ────────────────────────────
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
+    web_runner = None
 
     # Add movie conv
     app.add_handler(ConversationHandler(
@@ -761,7 +1121,11 @@ def main():
     app.add_handler(CommandHandler("series",        cmd_series))
     app.add_handler(CommandHandler("collections",   cmd_collections))
     app.add_handler(CommandHandler("backup",        cmd_backup))
+    app.add_handler(CommandHandler("backupall",     cmd_backupall))
+    app.add_handler(CommandHandler("setbackup",     cmd_setbackup))
+    app.add_handler(CommandHandler("logs",          cmd_logs))
     app.add_handler(CommandHandler("cancel",        cmd_cancel))
+    app.add_error_handler(on_error)
 
     # Menu inline callbacks
     app.add_handler(CallbackQueryHandler(menu_callback, pattern="^menu_"))
@@ -775,6 +1139,12 @@ def main():
         args=[app],
         next_run_time=datetime.now() + timedelta(seconds=10),  # first run shortly after start (remove in prod)
     )
+    scheduler.add_job(
+        auto_ping_services,
+        trigger="interval",
+        minutes=AUTO_PING_INTERVAL_MIN,
+        next_run_time=datetime.now() + timedelta(seconds=30),
+    )
 
     # Remove the "first run shortly after start" in production:
     # scheduler.add_job(perform_backup, trigger="interval", days=2, args=[app])
@@ -782,13 +1152,45 @@ def main():
     app.job_queue  # ensure job queue is ready
 
     async def on_startup(application: Application):
+        global BACKUP_CHAT_TARGET
+        BACKUP_CHAT_TARGET = load_backup_chat_target()
+        nonlocal web_runner
+        web_app = web.Application()
+        web_app.router.add_get("/", web_health_handler)
+        web_app.router.add_get("/health", web_json_health_handler)
+        web_app.router.add_get("/backup/all", web_backup_all_handler)
+        web_app.router.add_get("/logs", web_logs_handler)
+        web_runner = web.AppRunner(web_app)
+        await web_runner.setup()
+        site = web.TCPSite(web_runner, host=WEB_HOST, port=WEB_PORT)
+        await site.start()
+        await register_bot_commands(application)
+        if not BACKUP_CHAT_TARGET:
+            logger.warning("No backup chat configured. Use /setbackup <chat_id>.")
+            for admin_id in ADMIN_IDS[:3]:
+                try:
+                    await application.bot.send_message(
+                        admin_id,
+                        "⚠️ Backup channel is not configured.\nUse `/setbackup <chat_id>` to enable auto backups.",
+                        parse_mode=ParseMode.MARKDOWN,
+                    )
+                except Exception as e:
+                    logger.warning("Could not notify admin %s about backup setup: %s", admin_id, e)
         scheduler.start()
-        logger.info("Scheduler started — backup every 2 days.")
+        logger.info("Scheduler started — backup every 2 days, auto ping every %s minutes.", AUTO_PING_INTERVAL_MIN)
+        logger.info("Web service started on %s:%s", WEB_HOST, WEB_PORT)
+
+    async def on_shutdown(application: Application):
+        if web_runner:
+            await web_runner.cleanup()
+        scheduler.shutdown(wait=False)
+        logger.info("Scheduler and web service shut down.")
 
     app.post_init = on_startup
+    app.post_shutdown = on_shutdown
 
     logger.info("Bot starting…")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
