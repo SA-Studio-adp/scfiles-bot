@@ -2,154 +2,105 @@
 SCFiles Backend Manager Bot — Pyrogram Edition
 """
 
-import asyncio
-import io
-import json
-import logging
 import os
+import json
+import io
+import logging
 import zipfile
+import aiohttp
 from datetime import datetime, timedelta
 
 import aiohttp
 from aiohttp import web
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from pyrogram import Client, filters
-from pyrogram.types import (
-    CallbackQuery,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    Message,
+from aiohttp import web
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
+from telegram.ext import (
+    Application, CommandHandler, CallbackQueryHandler,
+    MessageHandler, ConversationHandler, ContextTypes, filters
 )
+from telegram.constants import ParseMode
+from telegram.helpers import escape_markdown
 
-# ─────────────────────── LOG FILE SETUP ───────────────────────
-LOG_FILE = "bot.log"
+LOG_FILE = os.environ.get("LOG_FILE", "bot.log")
+_log_format = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    _stream_handler = logging.StreamHandler()
+    _stream_handler.setFormatter(logging.Formatter(_log_format))
+    _file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
+    _file_handler.setFormatter(logging.Formatter(_log_format))
+    logger.addHandler(_stream_handler)
+    logger.addHandler(_file_handler)
 
-class TeeHandler(logging.Handler):
-    def __init__(self, path: str):
-        super().__init__()
-        self.path = path
-        self.setFormatter(logging.Formatter(
-            "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
-        ))
-    def emit(self, record):
-        try:
-            with open(self.path, "a", encoding="utf-8") as f:
-                f.write(self.format(record) + "\n")
-        except Exception:
-            pass
+# ──────────────────────────── CONFIG ────────────────────────────
+TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
+BACKEND_URL      = os.environ["BACKEND_URL"].rstrip("/")
+TMDB_API_KEY     = os.environ["TMDB_API_KEY"]
+ADMIN_IDS        = [int(x) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip()]
+BACKUP_CHAT_ID   = os.environ.get("BACKUP_CHAT_ID", "")      # legacy fallback
+BACKUP_CONFIG_FILE = os.environ.get("BACKUP_CONFIG_FILE", ".backup_config.json")
+WEB_HOST         = os.environ.get("WEB_HOST", "0.0.0.0")
+WEB_PORT         = int(os.environ.get("WEB_PORT", "8080"))
+BOT_WEB_URL      = os.environ.get("BOT_WEB_URL", "").rstrip("/")
+AUTO_PING_INTERVAL_MIN = int(os.environ.get("AUTO_PING_INTERVAL_MIN", "5"))
 
-_stream_handler = logging.StreamHandler()
-_stream_handler.setFormatter(logging.Formatter(
-    "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
-))
-_file_handler = TeeHandler(LOG_FILE)
-logging.basicConfig(level=logging.INFO, handlers=[_stream_handler, _file_handler])
-logger = logging.getLogger("scfiles-bot")
+TMDB_BASE        = "https://api.themoviedb.org/3"
+TMDB_IMG         = "https://image.tmdb.org/t/p/w500"
+BOT_STARTED_AT   = datetime.now()
+LAST_BACKUP_AT   = None
+LAST_AUTO_PING_AT = None
+BACKUP_CHAT_TARGET = BACKUP_CHAT_ID
+BOT_COMMANDS = [
+    ("start", "Main menu"),
+    ("help", "Show available commands"),
+    ("status", "Bot + backend health details"),
+    ("stats", "Database statistics"),
+    ("movies", "List recent movies"),
+    ("series", "List recent series"),
+    ("collections", "List collections"),
+    ("addmovie", "Add a movie (admin)"),
+    ("addseries", "Add a series (admin)"),
+    ("addcollection", "Add a collection (admin)"),
+    ("editmovie", "Edit a movie field (admin)"),
+    ("delmovie", "Delete a movie (admin)"),
+    ("delseries", "Delete a series (admin)"),
+    ("delcollection", "Delete a collection (admin)"),
+    ("tmdb", "Search TMDB metadata (admin)"),
+    ("backup", "Run manual backup (admin)"),
+    ("backupall", "Download all data as ZIP (admin)"),
+    ("setbackup", "Set backup channel/chat ID (admin)"),
+    ("logs", "Get recent bot logs (admin)"),
+    ("cancel", "Cancel current operation"),
+]
 
-# ─────────────────────── CONFIG ───────────────────────
-def _require(key: str) -> str:
-    v = os.environ.get(key, "").strip()
-    if not v:
-        raise RuntimeError(f"Missing required env var: {key}")
-    return v
+# ──────────────────────────── STATES ────────────────────────────
+(
+    ADD_MOVIE_TMDB, ADD_MOVIE_EXTRA, ADD_MOVIE_DL480, ADD_MOVIE_DL720,
+    ADD_MOVIE_DL1080, ADD_MOVIE_CONFIRM,
+    ADD_SERIES_TMDB, ADD_SERIES_EPISODES, ADD_SERIES_CONFIRM,
+    ADD_COL_ID, ADD_COL_NAME, ADD_COL_BANNER, ADD_COL_CONFIRM,
+    DEL_MOVIE_ID, DEL_SERIES_ID, DEL_COL_ID,
+    SEARCH_TMDB_Q, SEARCH_TYPE,
+    EDIT_MOVIE_ID, EDIT_FIELD, EDIT_VALUE,
+) = range(21)
 
-try:
-    API_ID       = int(_require("API_ID"))
-    API_HASH     = _require("API_HASH")
-    BOT_TOKEN    = _require("TELEGRAM_TOKEN")
-    BACKEND_URL  = _require("BACKEND_URL").rstrip("/")
-    TMDB_API_KEY = _require("TMDB_API_KEY")
-except RuntimeError as e:
-    logger.critical(str(e))
-    raise
+# ──────────────────────────── HELPERS ────────────────────────────
+def is_admin(user_id: int) -> bool:
+    return not ADMIN_IDS or user_id in ADMIN_IDS
 
-ADMIN_IDS       = [int(x) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip()]
-BACKUP_CHAT_ID  = os.environ.get("BACKUP_CHAT_ID", "").strip()
-WEB_HOST        = os.environ.get("WEB_HOST", "0.0.0.0")
-WEB_PORT        = int(os.environ.get("WEB_PORT", "8080"))
-BOT_WEB_URL     = os.environ.get("BOT_WEB_URL", "").rstrip("/")
-AUTO_PING_MIN   = int(os.environ.get("AUTO_PING_INTERVAL_MIN", "5"))
-BACKUP_CFG_FILE = os.environ.get("BACKUP_CONFIG_FILE", ".backup_config.json")
+def admin_only(func):
+    async def wrapper(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        uid = update.effective_user.id
+        if not is_admin(uid):
+            await update.message.reply_text("⛔ Access denied.")
+            return ConversationHandler.END
+        return await func(update, ctx)
+    wrapper.__name__ = func.__name__
+    return wrapper
 
-TMDB_BASE = "https://api.themoviedb.org/3"
-TMDB_IMG  = "https://image.tmdb.org/t/p/w500"
-
-# ─────────────── Runtime state ───────────────
-BOT_STARTED_AT = datetime.now()
-LAST_BACKUP_AT = None
-LAST_PING_AT   = None
-BACKUP_TARGET  = BACKUP_CHAT_ID
-
-# ─────────────── Conversation states ───────────────
-_user_state: dict[int, dict] = {}
-
-S_ADD_MOVIE_TMDB    = "add_movie_tmdb"
-S_ADD_MOVIE_EXTRA   = "add_movie_extra"
-S_ADD_MOVIE_DL480   = "add_movie_dl480"
-S_ADD_MOVIE_DL720   = "add_movie_dl720"
-S_ADD_MOVIE_DL1080  = "add_movie_dl1080"
-S_ADD_MOVIE_POS     = "add_movie_pos"
-S_ADD_MOVIE_CONFIRM = "add_movie_confirm"
-S_ADD_SERIES_TMDB   = "add_series_tmdb"
-S_ADD_SERIES_JSON   = "add_series_json"
-S_ADD_SERIES_CONFIRM= "add_series_confirm"
-S_ADD_COL_ID        = "add_col_id"
-S_ADD_COL_NAME      = "add_col_name"
-S_ADD_COL_BANNER    = "add_col_banner"
-S_ADD_COL_BGMUSIC   = "add_col_bgmusic"
-S_ADD_COL_MOVIES    = "add_col_movies"
-S_DEL_MOVIE         = "del_movie"
-S_DEL_SERIES        = "del_series"
-S_DEL_COL           = "del_col"
-S_EDIT_MOVIE_ID     = "edit_movie_id"
-S_EDIT_MOVIE_VALUE  = "edit_movie_value"
-S_TMDB_QUERY        = "tmdb_query"
-
-def get_state(uid: int) -> str | None:
-    return _user_state.get(uid, {}).get("state")
-
-def get_data(uid: int) -> dict:
-    return _user_state.get(uid, {}).get("data", {})
-
-def set_state(uid: int, state: str, **data):
-    _user_state[uid] = {"state": state, "data": data}
-
-def update_data(uid: int, **kwargs):
-    if uid in _user_state:
-        _user_state[uid]["data"].update(kwargs)
-
-def clear_state(uid: int):
-    _user_state.pop(uid, None)
-
-def is_admin(uid: int) -> bool:
-    return not ADMIN_IDS or uid in ADMIN_IDS
-
-# ─────────────── Backup config persistence ───────────────
-def load_backup_target() -> str:
-    if os.path.exists(BACKUP_CFG_FILE):
-        try:
-            with open(BACKUP_CFG_FILE) as f:
-                v = json.load(f).get("backup_chat_id", "")
-                if v:
-                    return str(v)
-        except Exception:
-            pass
-    return BACKUP_CHAT_ID
-
-def save_backup_target(chat_id: str):
-    with open(BACKUP_CFG_FILE, "w") as f:
-        json.dump({"backup_chat_id": str(chat_id)}, f)
-
-# ─────────────── Shared aiohttp session ───────────────
-_SESSION: aiohttp.ClientSession | None = None
-
-async def get_session() -> aiohttp.ClientSession:
-    global _SESSION
-    if _SESSION is None or _SESSION.closed:
-        _SESSION = aiohttp.ClientSession()
-    return _SESSION
-
-async def api_get(path: str):
+async def api_get(path: str) -> dict | list | None:
     try:
         s = await get_session()
         async with s.get(f"{BACKEND_URL}{path}", timeout=aiohttp.ClientTimeout(total=15)) as r:
@@ -310,78 +261,105 @@ def main_menu_kb() -> InlineKeyboardMarkup:
          InlineKeyboardButton("🔍 TMDB Search",   callback_data="menu_tmdb")],
         [InlineKeyboardButton("📊 Stats",         callback_data="menu_stats"),
          InlineKeyboardButton("🌐 Server Status", callback_data="menu_status")],
-        [InlineKeyboardButton("💾 Backup Now",    callback_data="menu_backup"),
-         InlineKeyboardButton("📦 Backup ZIP",    callback_data="menu_backup_zip")],
+        [InlineKeyboardButton("💾 Backup Now", callback_data="menu_backup"),
+         InlineKeyboardButton("📥 Backup All ZIP", callback_data="menu_backup_all")],
     ]
     if BOT_WEB_URL:
-        rows.append([InlineKeyboardButton("🩺 Web Dashboard", url=BOT_WEB_URL)])
-    return InlineKeyboardMarkup(rows)
-
-# ═══════════════════════════════════════
-#  COMMAND HANDLERS
-# ═══════════════════════════════════════
-
-@pyro.on_message(filters.command("start") & filters.private)
-async def cmd_start(_, msg: Message):
-    await msg.reply("🎛 **SCFiles Backend Manager**\n\nChoose an action:",
-                    reply_markup=main_menu_kb())
-
-@pyro.on_message(filters.command("help") & filters.private)
-async def cmd_help(_, msg: Message):
-    await msg.reply(
-        "📖 **Commands**\n\n"
-        "/start — Main menu\n"
-        "/status — Server health\n"
-        "/stats — DB statistics\n"
-        "/movies — List recent movies\n"
-        "/series — List recent series\n"
-        "/collections — List collections\n"
-        "/addmovie — Add a movie _(admin)_\n"
-        "/addseries — Add a series _(admin)_\n"
-        "/addcollection — Add a collection _(admin)_\n"
-        "/editmovie — Edit a movie field _(admin)_\n"
-        "/delmovie — Delete a movie _(admin)_\n"
-        "/delseries — Delete a series _(admin)_\n"
-        "/delcollection — Delete a collection _(admin)_\n"
-        "/tmdb — Search TMDB _(admin)_\n"
-        "/backup — Send backup files _(admin)_\n"
-        "/backupzip — Download backup as ZIP _(admin)_\n"
-        "/setbackup — Set backup channel _(admin)_\n"
-        "/logs — View deployment logs _(admin)_\n"
-        "/cancel — Cancel current operation"
+        kb.append([InlineKeyboardButton("🩺 Open Web Dashboard", url=BOT_WEB_URL)])
+    await update.message.reply_text(
+        "🎛 *SCFiles Backend Manager*\n\nChoose an action:",
+        reply_markup=InlineKeyboardMarkup(kb),
+        parse_mode=ParseMode.MARKDOWN,
     )
 
-@pyro.on_message(filters.command("cancel") & filters.private)
-async def cmd_cancel(_, msg: Message):
-    clear_state(msg.from_user.id)
-    await msg.reply("❌ Operation cancelled.")
+async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    lines = [f"/{name} — {description}" for name, description in BOT_COMMANDS]
+    text = "📖 *Available Commands*\n\n" + "\n".join(lines)
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
-@pyro.on_message(filters.command("status") & filters.private)
-async def cmd_status(_, msg: Message):
-    now    = datetime.now()
-    uptime = str(now - BOT_STARTED_AT).split(".")[0]
+async def register_bot_commands(application: Application):
+    await application.bot.set_my_commands(
+        [BotCommand(command=name, description=description[:256]) for name, description in BOT_COMMANDS]
+    )
+    logger.info("Registered %s bot commands with Telegram.", len(BOT_COMMANDS))
+
+def read_log_tail(limit_bytes: int = 32_768) -> bytes:
+    if not os.path.exists(LOG_FILE):
+        return b""
+    with open(LOG_FILE, "rb") as fp:
+        fp.seek(0, os.SEEK_END)
+        size = fp.tell()
+        fp.seek(max(0, size - limit_bytes))
+        return fp.read()
+
+def load_backup_chat_target() -> str:
+    if os.path.exists(BACKUP_CONFIG_FILE):
+        try:
+            with open(BACKUP_CONFIG_FILE, "r", encoding="utf-8") as fp:
+                data = json.load(fp)
+                val = str(data.get("backup_chat_id", "")).strip()
+                if val:
+                    return val
+        except Exception as e:
+            logger.warning("Failed to load %s: %s", BACKUP_CONFIG_FILE, e)
+    return str(BACKUP_CHAT_ID).strip()
+
+def save_backup_chat_target(chat_id: str):
+    with open(BACKUP_CONFIG_FILE, "w", encoding="utf-8") as fp:
+        json.dump({"backup_chat_id": str(chat_id)}, fp, indent=2)
+
+# ──────────────────────────── SERVER STATUS ────────────────────────────
+async def check_status(update_or_query, is_query=False):
+    send = update_or_query.edit_message_text if is_query else update_or_query.message.reply_text
+    now = datetime.now()
+    uptime = now - BOT_STARTED_AT
+    bot_health = "🟢 Online"
     try:
-        s = await get_session()
-        t0 = datetime.now()
-        async with s.get(BACKEND_URL, timeout=aiohttp.ClientTimeout(total=10)) as r:
-            ms   = (datetime.now() - t0).total_seconds() * 1000
-            code = r.status
-            body = (await r.text())[:80]
-        ic  = "🟢" if code == 200 else "🟡"
-        txt = (
-            f"**Health Report**\n\n"
-            f"🤖 Bot: 🟢 Online  |  ⏱ `{uptime}`\n\n"
-            f"🖥 Backend: {ic} `{code}`  |  ⚡ `{ms:.0f}ms`\n"
-            f"🔗 `{BACKEND_URL}`\n"
-            f"📨 `{body}`"
-        )
+        start = now
+        async with aiohttp.ClientSession() as s:
+            async with s.get(BACKEND_URL, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                elapsed = (datetime.now() - start).total_seconds() * 1000
+                status  = "🟢 Online" if r.status == 200 else f"🟡 Status {r.status}"
+                body    = escape_markdown((await r.text())[:80], version=2)
+                msg     = (
+                    f"*Health Details*\n\n"
+                    f"🤖 Bot: {bot_health}\n"
+                    f"⏱ Bot Uptime: `{escape_markdown(str(uptime).split('.')[0], version=2)}`\n\n"
+                    f"🖥 Backend: {status}\n"
+                    f"🔗 `{escape_markdown(BACKEND_URL, version=2)}`\n"
+                    f"⚡ Response: `{elapsed:.0f}ms`\n"
+                    f"📨 Body: `{body[:80]}`\n"
+                    f"🕐 Checked: `{escape_markdown(now.strftime('%Y-%m-%d %H:%M:%S'), version=2)}`"
+                )
     except Exception as e:
-        txt = (
-            f"**Health Report**\n\n"
-            f"🤖 Bot: 🟢 Online  |  ⏱ `{uptime}`\n\n"
-            f"🖥 Backend: 🔴 Offline\n❗ `{e}`"
+        err = escape_markdown(str(e), version=2)
+        msg = (
+            f"*Health Details*\n\n"
+            f"🤖 Bot: {bot_health}\n"
+            f"⏱ Bot Uptime: `{escape_markdown(str(uptime).split('.')[0], version=2)}`\n\n"
+            f"🖥 Backend: 🔴 Offline\n"
+            f"🔗 `{escape_markdown(BACKEND_URL, version=2)}`\n"
+            f"❗ Error: `{err}`\n"
+            f"🕐 Checked: `{escape_markdown(now.strftime('%Y-%m-%d %H:%M:%S'), version=2)}`"
         )
-    await msg.reply(txt)
+    await send(msg, parse_mode=ParseMode.MARKDOWN_V2)
+
+async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await check_status(update)
+
+# ──────────────────────────── STATS ────────────────────────────
+async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    movies      = await api_get("/api/movies") or []
+    series      = await api_get("/api/series") or []
+    collections = await api_get("/api/collections") or {}
+    msg = (
+        f"📊 *Database Statistics*\n\n"
+        f"🎬 Movies: *{len(movies)}*\n"
+        f"📺 Series: *{len(series)}*\n"
+        f"🗂 Collections: *{len(collections)}*\n\n"
+        f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    )
+    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
 @pyro.on_message(filters.command("stats") & filters.private)
 async def cmd_stats(_, msg: Message):
@@ -603,288 +581,254 @@ async def _dispatch(msg: Message, uid: int, state: str, text: str):
             else:
                 await msg.reply(caption)
         else:
-            await msg.reply("⚠️ TMDB not found.\nEnter **extras** or `-` to skip:")
-        set_state(uid, S_ADD_MOVIE_EXTRA, **mdata)
+            full = await tmdb_tv(r["id"])
+            if full:
+                msg    = fmt_tmdb_tv(full) + f"\n\n🆔 TMDB ID: `{full['id']}`"
+                poster = poster_url(full.get("poster_path"))
+                if poster:
+                    await update.message.reply_photo(poster, caption=msg, parse_mode=ParseMode.MARKDOWN)
+                else:
+                    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+    return ConversationHandler.END
 
-    elif state == S_ADD_MOVIE_EXTRA:
-        d["extras"] = "" if text == "-" else text
-        set_state(uid, S_ADD_MOVIE_DL480, **d)
-        await msg.reply("📥 Enter **480p download link** (or `-` to skip):")
+# ──────────────────────────── BACKUP ────────────────────────────
+async def perform_backup(app: Application, target_chat_id: str | int | None = None) -> tuple[bool, str]:
+    """Fetch all data and send as JSON files to backup chat/channel."""
+    global LAST_BACKUP_AT
+    resolved_target = str(target_chat_id or BACKUP_CHAT_TARGET).strip()
+    if not resolved_target:
+        logger.warning("Backup channel not set, skipping backup.")
+        return False, "Backup chat/channel is not configured."
+    endpoints = {
+        "movies.json":      "/api/movies",
+        "series.json":      "/api/series",
+        "collections.json": "/api/collections",
+    }
+    ts = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    try:
+        await app.bot.send_message(resolved_target, f"💾 *Auto-Backup* — {ts}", parse_mode=ParseMode.MARKDOWN)
+        for filename, path in endpoints.items():
+            data = await api_get(path)
+            if data is not None:
+                content = json.dumps(data, indent=2, ensure_ascii=False).encode()
+                fname   = f"{ts}_{filename}"
+                await app.bot.send_document(
+                    resolved_target,
+                    document=content,
+                    filename=fname,
+                    caption=f"📦 `{fname}`",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+        LAST_BACKUP_AT = datetime.now()
+        logger.info("Backup completed at %s and sent to %s", ts, resolved_target)
+        return True, resolved_target
+    except Exception as e:
+        logger.error("Backup failed for target %s: %s", resolved_target, e)
+        return False, str(e)
 
-    elif state == S_ADD_MOVIE_DL480:
-        if text != "-":
-            d["downloads"]["480"] = text
-        set_state(uid, S_ADD_MOVIE_DL720, **d)
-        await msg.reply("📥 Enter **720p download link** (or `-` to skip):")
+async def collect_backup_payloads() -> dict[str, bytes]:
+    endpoints = {
+        "movies.json": "/api/movies",
+        "series.json": "/api/series",
+        "collections.json": "/api/collections",
+    }
+    payloads: dict[str, bytes] = {}
+    for filename, path in endpoints.items():
+        data = await api_get(path)
+        if data is None:
+            raise RuntimeError(f"Unable to fetch {path}")
+        payloads[filename] = json.dumps(data, indent=2, ensure_ascii=False).encode()
+    return payloads
 
-    elif state == S_ADD_MOVIE_DL720:
-        if text != "-":
-            d["downloads"]["720"] = text
-        set_state(uid, S_ADD_MOVIE_DL1080, **d)
-        await msg.reply("📥 Enter **1080p download link** (or `-` to skip):")
+async def create_backup_zip_bytes() -> tuple[bytes, str]:
+    payloads = await collect_backup_payloads()
+    ts = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for fname, content in payloads.items():
+            zf.writestr(f"{ts}_{fname}", content)
+    zip_buffer.seek(0)
+    return zip_buffer.read(), ts
 
-    elif state == S_ADD_MOVIE_DL1080:
-        if text != "-":
-            d["downloads"]["1080"] = text
-        set_state(uid, S_ADD_MOVIE_POS, **d)
-        kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("⬆️ Top",    callback_data="pos_top"),
-            InlineKeyboardButton("⬇️ Bottom", callback_data="pos_bottom"),
-        ]])
-        await msg.reply("📌 Where should this movie appear?", reply_markup=kb)
+async def auto_ping_services():
+    global LAST_AUTO_PING_AT
+    targets = [("backend", BACKEND_URL)]
+    if BOT_WEB_URL:
+        targets.append(("bot", f"{BOT_WEB_URL}/health"))
+    try:
+        async with aiohttp.ClientSession() as s:
+            for name, url in targets:
+                try:
+                    async with s.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                        logger.info("Auto ping %s => %s (%s)", name, r.status, url)
+                except Exception as e:
+                    logger.warning("Auto ping failed for %s (%s): %s", name, url, e)
+    finally:
+        LAST_AUTO_PING_AT = datetime.now()
 
-    elif state == S_ADD_MOVIE_POS:
-        await msg.reply("👆 Please tap **Top** or **Bottom** above.")
+async def web_health_handler(request: web.Request) -> web.Response:
+    now = datetime.now()
+    uptime = str((now - BOT_STARTED_AT)).split(".")[0]
+    backend_status = "offline"
+    backend_code = "N/A"
+    backend_latency = "N/A"
+    backend_latency_ms = 0.0
+    backend_error = ""
+    try:
+        start = datetime.now()
+        async with aiohttp.ClientSession() as s:
+            async with s.get(BACKEND_URL, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                backend_code = str(r.status)
+                backend_latency_ms = (datetime.now() - start).total_seconds() * 1000
+                backend_latency = f"{backend_latency_ms:.0f}ms"
+                backend_status = "online" if r.status == 200 else "degraded"
+    except Exception as exc:
+        backend_error = str(exc)
 
-    elif state == S_ADD_MOVIE_CONFIRM:
-        if text.lower() == "no":
-            clear_state(uid)
-            return await msg.reply("❌ Cancelled.")
-        if text.lower() != "yes":
-            return await msg.reply("Type **yes** to confirm or **no** to cancel.")
-        d.setdefault("subtitles", {})
-        pos     = d.get("pos", "bottom")
-        payload = {**d, "position": pos}   # 'position' = API insertion param
-        result  = await api_post("/api/movies", payload)
-        clear_state(uid)
-        if result and result.get("success"):
-            await msg.reply(f"✅ Movie added to **{pos}**! Total: **{result['count']}**")
-        else:
-            await msg.reply(f"❌ Failed: `{result}`")
+    backup_text = LAST_BACKUP_AT.strftime("%Y-%m-%d %H:%M:%S") if LAST_BACKUP_AT else "Never"
+    ping_text = LAST_AUTO_PING_AT.strftime("%Y-%m-%d %H:%M:%S") if LAST_AUTO_PING_AT else "Never"
+    movies = await api_get("/api/movies") or []
+    series = await api_get("/api/series") or []
+    collections = await api_get("/api/collections") or {}
+    latency_width = min(max(int(backend_latency_ms / 10), 5), 100) if backend_latency_ms else 5
+    latency_color = "var(--ok)" if backend_latency_ms and backend_latency_ms < 400 else ("var(--warn)" if backend_latency_ms < 1000 else "var(--bad)")
+    html = f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SCFiles | System Health</title>
+    <style>
+      :root {{
+        --bg: #080c14; --card: #111b2d; --card-hover: #16243d; --border: #1f2a44;
+        --text: #f0f4f8; --muted: #8a9ab5; --ok: #10b981; --warn: #fbbf24; --bad: #ef4444;
+        --accent: #3b82f6; --accent-glow: rgba(59, 130, 246, 0.2);
+      }}
+      body {{
+        font-family: 'Inter', system-ui, -apple-system, sans-serif; max-width: 1000px;
+        margin: 0 auto; padding: 2rem 1rem; background: var(--bg); color: var(--text); line-height: 1.5;
+      }}
+      header {{ margin-bottom: 2.5rem; display: flex; justify-content: space-between; align-items: flex-end; }}
+      h1 {{ margin: 0; font-size: 1.8rem; letter-spacing: -0.5px; }}
+      .refresh-indicator {{ font-size: 0.8rem; color: var(--muted); display: flex; align-items: center; gap: 6px; }}
+      .pulse {{
+        width: 8px; height: 8px; background: var(--ok); border-radius: 50%;
+        box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); animation: pulse 2s infinite;
+      }}
+      @keyframes pulse {{
+        0% {{ transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); }}
+        70% {{ transform: scale(1); box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); }}
+        100% {{ transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }}
+      }}
+      .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; margin-bottom: 1.5rem; }}
+      .stats-grid {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 1.5rem; }}
+      .card {{
+        background: var(--card); border: 1px solid var(--border); border-radius: 16px;
+        padding: 1.25rem; transition: transform 0.2s ease, background 0.2s ease;
+      }}
+      .card:hover {{ background: var(--card-hover); }}
+      .kpi-label {{ color: var(--muted); font-size: 0.85rem; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px; }}
+      .kpi-value {{ font-size: 2rem; font-weight: 800; margin-top: 0.2rem; color: var(--accent); }}
+      h2 {{ font-size: 1.1rem; margin-top: 0; color: var(--muted); display: flex; align-items: center; gap: 8px; }}
+      .status-row {{ display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }}
+      .status-row:last-of-type {{ border-bottom: none; }}
+      .tag {{ font-family: monospace; padding: 2px 8px; border-radius: 6px; background: rgba(255,255,255,0.05); font-size: 0.9rem; }}
+      .btn-group {{ display: flex; gap: 12px; margin-top: 2rem; }}
+      .button {{ flex: 1; text-align: center; padding: 0.8rem; border-radius: 10px; font-weight: 600; text-decoration: none; transition: all 0.2s; border: 1px solid var(--accent); }}
+      .btn-primary {{ background: var(--accent); color: white; box-shadow: 0 4px 14px var(--accent-glow); }}
+      .btn-outline {{ color: var(--accent); }}
+      .button:hover {{ filter: brightness(1.1); transform: translateY(-1px); }}
+      .latency-bar {{ width: 100%; height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px; margin-top: 8px; overflow: hidden; }}
+      .latency-fill {{ height: 100%; }}
+      .ok {{ color: var(--ok); }} .warn {{ color: var(--warn); }} .bad {{ color: var(--bad); }} .muted {{ color: var(--muted); }}
+    </style>
+  </head>
+  <body>
+    <header>
+      <div>
+        <h1>SCFiles Bot Dashboard</h1>
+        <div class="refresh-indicator"><div class="pulse"></div>Live • Updated {now.strftime("%H:%M:%S")}</div>
+      </div>
+    </header>
+    <div class="stats-grid">
+      <div class="card"><div class="kpi-label">Movies</div><div class="kpi-value">{len(movies)}</div></div>
+      <div class="card"><div class="kpi-label">Series</div><div class="kpi-value">{len(series)}</div></div>
+      <div class="card"><div class="kpi-label">Collections</div><div class="kpi-value">{len(collections)}</div></div>
+    </div>
+    <div class="card">
+      <div class="grid">
+        <div class="card">
+          <h2><span>🤖</span> Bot Health</h2>
+          <div class="status-row"><span>Status</span><span class="ok" style="font-weight:bold; text-transform:uppercase">Online</span></div>
+          <div class="status-row"><span>Uptime</span><span class="tag">{uptime}</span></div>
+          <div class="status-row"><span>Last Backup</span><span class="muted">{backup_text}</span></div>
+          <div class="status-row"><span>Last Ping</span><span class="muted">{ping_text}</span></div>
+        </div>
+        <div class="card">
+          <h2><span>🌐</span> Backend Health</h2>
+          <div class="status-row"><span>Status</span><span class="{'ok' if backend_status == 'online' else 'warn' if backend_status == 'degraded' else 'bad'}" style="font-weight:bold; text-transform:uppercase">{backend_status}</span></div>
+          <div class="status-row"><span>Latency</span><span>{backend_latency}</span></div>
+          <div class="latency-bar"><div class="latency-fill" style="width: {latency_width}%; background: {latency_color};"></div></div>
+          <div class="status-row" style="margin-top:12px"><span>Response Code</span><span class="tag">{backend_code}</span></div>
+          <p class="muted" style="font-size:0.75rem; margin-top:10px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">URL: {BACKEND_URL}</p>
+        </div>
+      </div>
+    </div>
+    <div class="btn-group">
+      <a class="button btn-primary" href="/backup/all">📦 Backup Database</a>
+      <a class="button btn-outline" href="/logs">📋 View Logs</a>
+      <a class="button btn-outline" href="/health">🔍 JSON Raw Data</a>
+    </div>
+    <script>setTimeout(() => location.reload(), 60000);</script>
+  </body>
+</html>
+"""
+    return web.Response(text=html, content_type="text/html")
 
-    # ── ADD SERIES ────────────────────────────────────────────────────
-    elif state == S_ADD_SERIES_TMDB:
-        if not text.isdigit():
-            return await msg.reply("❌ Enter a valid numeric TMDB ID.")
-        tid  = int(text)
-        info = await tmdb_tv(tid)
-        sdata = {"tmdb_id": str(tid), "seasons": []}   # tmdb_id is STRING in series.json
-        if info:
-            sdata["id"] = (info.get("name") or "").lower().replace(" ", "-").replace("'", "")
-            p       = poster_url(info)
-            caption = (
-                fmt_tv(info)
-                + f"\n\nSuggested ID: `{sdata['id']}`\n\n"
-                + "📋 Paste **episode data** as JSON:\n"
-                + "```\n[\n  {\n    \"season_number\": 1,\n    \"episodes\": [\n"
-                + "      {\"ep_number\": 1, \"links\": {\"360p\": \"URL\", \"720p\": \"URL\"}, \"subtitle\": \"\"}\n"
-                + "    ]\n  }\n]\n```"
-            )
-            if p:
-                await msg.reply_photo(p, caption=caption)
-            else:
-                await msg.reply(caption)
-        else:
-            await msg.reply("⚠️ TMDB not found. Paste episode JSON:")
-        set_state(uid, S_ADD_SERIES_JSON, **sdata)
+async def web_json_health_handler(request: web.Request) -> web.Response:
+    now = datetime.now()
+    backend = {"status": "offline", "http_status": None, "latency_ms": None, "error": None}
+    try:
+        start = datetime.now()
+        async with aiohttp.ClientSession() as s:
+            async with s.get(BACKEND_URL, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                backend["http_status"] = r.status
+                backend["latency_ms"] = round((datetime.now() - start).total_seconds() * 1000, 2)
+                backend["status"] = "online" if r.status == 200 else "degraded"
+    except Exception as exc:
+        backend["error"] = str(exc)
+    return web.json_response({
+        "bot": {
+            "status": "online",
+            "uptime_seconds": int((now - BOT_STARTED_AT).total_seconds()),
+            "last_backup_at": LAST_BACKUP_AT.isoformat() if LAST_BACKUP_AT else None,
+            "last_auto_ping_at": LAST_AUTO_PING_AT.isoformat() if LAST_AUTO_PING_AT else None,
+        },
+        "backend": backend,
+        "time": now.isoformat(),
+    })
 
-    elif state == S_ADD_SERIES_JSON:
-        try:
-            seasons = json.loads(text)
-            if not isinstance(seasons, list):
-                raise ValueError("Must be a JSON array [ ... ]")
-            for s in seasons:
-                if "season_number" not in s or "episodes" not in s:
-                    raise ValueError("Each season needs 'season_number' and 'episodes'")
-                for ep in s["episodes"]:
-                    if "ep_number" not in ep or "links" not in ep:
-                        raise ValueError("Each episode needs 'ep_number' and 'links'")
-                    ep.setdefault("subtitle", "")
-        except (json.JSONDecodeError, ValueError) as e:
-            return await msg.reply(
-                f"❌ Invalid JSON: `{e}`\n\n"
-                "Required format:\n"
-                "```\n[{\"season_number\":1,\"episodes\":"
-                "[{\"ep_number\":1,\"links\":{\"360p\":\"URL\",\"720p\":\"URL\"},\"subtitle\":\"\"}]}]\n```"
-            )
-        d["seasons"] = seasons
-        total_eps    = sum(len(s.get("episodes", [])) for s in seasons)
-        set_state(uid, S_ADD_SERIES_CONFIRM, **d)
-        await msg.reply(
-            f"✅ **Confirm Series**\n\n"
-            f"ID: `{d.get('id','?')}`\n"
-            f"TMDB ID: `{d.get('tmdb_id','?')}`\n"
-            f"Seasons: `{len(seasons)}`  |  Episodes: `{total_eps}`\n"
-            f"Position: `top` _(always)_\n\n"
-            f"Type **yes** to confirm or **no** to cancel:"
-        )
+async def web_backup_all_handler(request: web.Request) -> web.StreamResponse:
+    zip_bytes, ts = await create_backup_zip_bytes()
+    return web.Response(
+        body=zip_bytes,
+        headers={
+            "Content-Type": "application/zip",
+            "Content-Disposition": f'attachment; filename="backup_all_{ts}.zip"',
+        },
+    )
 
-    elif state == S_ADD_SERIES_CONFIRM:
-        if text.lower() == "no":
-            clear_state(uid)
-            return await msg.reply("❌ Cancelled.")
-        if text.lower() != "yes":
-            return await msg.reply("Type **yes** to confirm or **no** to cancel.")
-        d["position"] = "top"
-        result = await api_post("/api/series", d)
-        clear_state(uid)
-        if result and result.get("success"):
-            await msg.reply(f"✅ Series added to **top**! Total: **{result['count']}**")
-        else:
-            await msg.reply(f"❌ Failed: `{result}`")
-
-    # ── ADD COLLECTION ────────────────────────────────────────────────
-    elif state == S_ADD_COL_ID:
-        set_state(uid, S_ADD_COL_NAME, col_id=text)
-        await msg.reply("Enter collection **Name**:")
-
-    elif state == S_ADD_COL_NAME:
-        d["col_name"] = text
-        set_state(uid, S_ADD_COL_BANNER, **d)
-        await msg.reply("Enter **banner URL** (or `-` to skip):")
-
-    elif state == S_ADD_COL_BANNER:
-        d["col_banner"] = "" if text == "-" else text
-        set_state(uid, S_ADD_COL_BGMUSIC, **d)
-        await msg.reply("Enter **bg-music URL** (or `-` to skip):")
-
-    elif state == S_ADD_COL_BGMUSIC:
-        d["col_bgmusic"] = "" if text == "-" else text
-        set_state(uid, S_ADD_COL_MOVIES, **d)
-        await msg.reply(
-            "📋 Paste **movies list** as JSON array.\n\n"
-            "Each item needs: `id`, `tmdb_id` (int), `quality`, `download`\n\n"
-            "```\n[\n"
-            "  {\n"
-            "    \"id\": \"movie-slug\",\n"
-            "    \"tmdb_id\": 12345,\n"
-            "    \"quality\": \"1080p\",\n"
-            "    \"download\": \"https://cdn-scfiles.vercel.app/dl/...\"\n"
-            "  }\n"
-            "]\n```"
-        )
-
-    elif state == S_ADD_COL_MOVIES:
-        try:
-            movies_list = json.loads(text)
-            if not isinstance(movies_list, list):
-                raise ValueError("Must be a JSON array")
-            for m in movies_list:
-                missing = [k for k in ("id", "tmdb_id", "quality", "download") if k not in m]
-                if missing:
-                    raise ValueError(f"Movie object missing keys: {missing}")
-        except (json.JSONDecodeError, ValueError) as e:
-            return await msg.reply(f"❌ Invalid JSON: `{e}`\n\nTry again:")
-        payload = {
-            "id":       d["col_id"],
-            "name":     d["col_name"],
-            "banner":   d.get("col_banner", ""),
-            "bg-music": d.get("col_bgmusic", ""),
-            "movies":   movies_list,
-        }
-        result = await api_post("/api/collections", payload)
-        clear_state(uid)
-        if result and result.get("success"):
-            await msg.reply(
-                f"✅ Collection **{d['col_name']}** created!\n"
-                f"Movies: **{len(movies_list)}** | Total: **{result['total']}**"
-            )
-        else:
-            await msg.reply(f"❌ Failed: `{result}`")
-
-    # ── DELETE ────────────────────────────────────────────────────────
-    elif state == S_DEL_MOVIE:
-        result = await api_delete(f"/api/movies/{text}")
-        clear_state(uid)
-        if result and result.get("success"):
-            await msg.reply(f"✅ Movie `{text}` deleted. Remaining: **{result['count']}**")
-        else:
-            await msg.reply(f"❌ {result or 'Failed'}")
-
-    elif state == S_DEL_SERIES:
-        result = await api_delete(f"/api/series/{text}")
-        clear_state(uid)
-        if result and result.get("success"):
-            await msg.reply(f"✅ Series `{text}` deleted. Remaining: **{result['count']}**")
-        else:
-            await msg.reply(f"❌ {result or 'Failed'}")
-
-    elif state == S_DEL_COL:
-        result = await api_delete(f"/api/collections/{text}")
-        clear_state(uid)
-        if result and result.get("success"):
-            await msg.reply(f"✅ Collection `{text}` deleted. Total: **{result['total']}**")
-        else:
-            await msg.reply(f"❌ {result or 'Failed'}")
-
-    # ── EDIT MOVIE ────────────────────────────────────────────────────
-    elif state == S_EDIT_MOVIE_ID:
-        movies = await api_get("/api/movies") or []
-        movie  = next((m for m in movies if m["id"] == text), None)
-        if not movie:
-            return await msg.reply("❌ Movie not found. Try again or /cancel:")
-        set_state(uid, S_EDIT_MOVIE_VALUE, edit_movie=movie, edit_field=None)
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton(f"✏️ {f}", callback_data=f"ef_{f}")]
-            for f in ["extras", "downloads", "subtitles", "tmdb_id", "id"]
-        ])
-        await msg.reply(f"🎬 Found: `{text}`\n\nChoose field to edit:", reply_markup=kb)
-
-    elif state == S_EDIT_MOVIE_VALUE:
-        field = d.get("edit_field")
-        if not field:
-            return await msg.reply("👆 Please choose a field using the buttons above.")
-        movie = d.get("edit_movie", {})
-        try:
-            val = json.loads(text)
-        except Exception:
-            val = text
-        movie[field] = val
-        result = await api_post("/api/movies", movie)
-        clear_state(uid)
-        if result and result.get("success"):
-            await msg.reply(f"✅ `{movie.get('id')}` updated! Field `{field}` saved.")
-        else:
-            await msg.reply(f"❌ Failed: `{result}`")
-
-    # ── TMDB SEARCH ───────────────────────────────────────────────────
-    elif state == S_TMDB_QUERY:
-        mtype   = d.get("tmdb_type", "movie")
-        results = await tmdb_search(text, mtype)
-        clear_state(uid)
-        if not results:
-            return await msg.reply("❌ No results found.")
-        for r in results[:3]:
-            full = await tmdb_movie(r["id"]) if mtype == "movie" else await tmdb_tv(r["id"])
-            if not full:
-                continue
-            cap = (fmt_movie(full) if mtype == "movie" else fmt_tv(full)) + f"\n\n🆔 TMDB ID: `{full['id']}`"
-            p   = poster_url(full)
-            if p:
-                await msg.reply_photo(p, caption=cap)
-            else:
-                await msg.reply(cap)
-
-
-# ═══════════════════════════════════════
-#  CALLBACK QUERY HANDLER
-# ═══════════════════════════════════════
-@pyro.on_callback_query()
-async def on_cb(_, cb: CallbackQuery):
-    if not cb.from_user:
-        return
-    uid  = cb.from_user.id
-    data = cb.data or ""
-
-    # ── TMDB type buttons ──
-    if data in ("tmdb_movie", "tmdb_tv"):
-        mtype = "tv" if data == "tmdb_tv" else "movie"
-        set_state(uid, S_TMDB_QUERY, tmdb_type=mtype)
-        await cb.answer()
-        await cb.message.edit_text("🔍 Enter your search query:")
-        return
-
-    # ── Edit field buttons ──
-    if data.startswith("ef_"):
-        field = data[3:]
-        update_data(uid, edit_field=field)
-        current = get_data(uid).get("edit_movie", {}).get(field, "")
-        await cb.answer(f"Editing: {field}")
-        await cb.message.edit_text(
-            f"Current `{field}`:\n`{json.dumps(current)}`\n\n"
-            "Enter new value (JSON for objects/arrays):"
-        )
-        return
+async def web_logs_handler(request: web.Request) -> web.StreamResponse:
+    tail = read_log_tail()
+    if not tail:
+        return web.Response(text="No logs available yet.", content_type="text/plain")
+    return web.Response(
+        body=tail,
+        headers={
+            "Content-Type": "text/plain; charset=utf-8",
+            "Content-Disposition": 'inline; filename="bot.log"',
+        },
+    )
 
     # ── Movie position buttons ──
     if data in ("pos_top", "pos_bottom"):
@@ -906,6 +850,62 @@ async def on_cb(_, cb: CallbackQuery):
             f"Type **yes** to confirm or **no** to cancel:"
         )
         return
+    await update.message.reply_text("💾 Starting backup…")
+    fallback_chat = str(update.effective_chat.id)
+    success, info = await perform_backup(ctx.application, target_chat_id=BACKUP_CHAT_TARGET or fallback_chat)
+    if success:
+        await update.message.reply_text(f"✅ Backup sent to `{info}`.", parse_mode=ParseMode.MARKDOWN)
+    else:
+        await update.message.reply_text(
+            f"❌ Backup failed: `{info}`\n\nSet/verify backup channel using `/setbackup <chat_id>`.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+
+async def cmd_backupall(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ Access denied.")
+        return
+    await update.message.reply_text("📦 Preparing backup ZIP…")
+    try:
+        zip_bytes, ts = await create_backup_zip_bytes()
+        await update.message.reply_document(
+            document=zip_bytes,
+            filename=f"backup_all_{ts}.zip",
+            caption="✅ Backup ZIP ready.",
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Failed to build ZIP backup.\n`{e}`", parse_mode=ParseMode.MARKDOWN)
+
+@admin_only
+async def cmd_setbackup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    global BACKUP_CHAT_TARGET
+    if not ctx.args:
+        current = BACKUP_CHAT_TARGET or "Not configured"
+        await update.message.reply_text(
+            f"📦 Current backup chat: `{current}`\n\nUsage:\n`/setbackup <chat_id>`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+    chat_id = ctx.args[0].strip()
+    BACKUP_CHAT_TARGET = chat_id
+    save_backup_chat_target(chat_id)
+    await update.message.reply_text(
+        f"✅ Backup chat updated to `{chat_id}`.\nAll auto/manual backups will use this chat.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+@admin_only
+async def cmd_logs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    tail = read_log_tail()
+    if not tail:
+        await update.message.reply_text("📭 No logs available yet.")
+        return
+    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    await update.message.reply_document(
+        document=tail,
+        filename=f"bot_logs_{ts}.txt",
+        caption=f"📋 Last {max(1, len(tail)//1024)}KB logs",
+    )
 
     # ── Menu buttons ──
     await cb.answer()
@@ -938,24 +938,24 @@ async def on_cb(_, cb: CallbackQuery):
         )
 
     elif data == "menu_backup":
-        await cb.message.edit_text("💾 Running backup…")
-        dest = BACKUP_TARGET or str(cb.message.chat.id)
-        ok, info = await perform_backup(pyro, dest)
-        await cb.message.edit_text(
-            f"✅ Backup sent to `{info}`." if ok else f"❌ Backup failed:\n`{info}`"
-        )
-
-    elif data == "menu_backup_zip":
-        await cb.message.edit_text("📦 Building ZIP…")
+        await q.edit_message_text("💾 Running backup…")
+        success, info = await perform_backup(ctx.application, target_chat_id=BACKUP_CHAT_TARGET or str(q.message.chat_id))
+        if success:
+            await q.edit_message_text(f"✅ Backup sent to `{info}`.", parse_mode=ParseMode.MARKDOWN)
+        else:
+            await q.edit_message_text(f"❌ Backup failed: {info}")
+    elif data == "menu_backup_all":
+        await q.edit_message_text("📦 Building backup ZIP…")
         try:
-            zip_data, ts = await create_zip()
-            buf = io.BytesIO(zip_data)
-            buf.name = f"backup_all_{ts}.zip"
-            await cb.message.reply_document(buf, caption=f"✅ Backup ZIP `{ts}`")
-            await cb.message.edit_text("✅ ZIP sent above.")
+            zip_bytes, ts = await create_backup_zip_bytes()
+            await q.message.reply_document(
+                document=zip_bytes,
+                filename=f"backup_all_{ts}.zip",
+                caption="✅ Backup ZIP is ready.",
+            )
+            await q.edit_message_text("✅ Backup ZIP sent.")
         except Exception as e:
-            await cb.message.edit_text(f"❌ ZIP failed:\n`{e}`")
-
+            await q.edit_message_text(f"❌ Could not build backup ZIP: {e}")
     elif data == "menu_movies":
         items = await api_get("/api/movies?limit=10") or []
         lines = [f"• `{m.get('id','?')}` | `{m.get('tmdb_id','?')}`" for m in items[:10]]
@@ -972,7 +972,135 @@ async def on_cb(_, cb: CallbackQuery):
         await cb.message.edit_text("🗂 **Collections**\n\n" + ("\n".join(lines) or "None"))
 
     elif data == "menu_tmdb":
-        await cb.message.edit_text("Use /tmdb to search TMDB.")
+        await q.edit_message_text("Use /tmdb command to search TMDB.")
+
+# ──────────────────────────── CANCEL ────────────────────────────
+async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data.clear()
+    await update.message.reply_text("❌ Operation cancelled.")
+    return ConversationHandler.END
+
+async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE):
+    logger.error("Unhandled bot error: %s", ctx.error)
+    if update and isinstance(update, Update) and update.effective_message:
+        try:
+            await update.effective_message.reply_text("⚠️ Something went wrong. Please try again.")
+        except Exception:
+            pass
+
+# ──────────────────────────── MAIN ────────────────────────────
+def main():
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    web_runner = None
+
+    # Add movie conv
+    app.add_handler(ConversationHandler(
+        entry_points=[CommandHandler("addmovie", cmd_addmovie)],
+        states={
+            ADD_MOVIE_TMDB:    [MessageHandler(filters.TEXT & ~filters.COMMAND, addmovie_tmdb)],
+            ADD_MOVIE_EXTRA:   [MessageHandler(filters.TEXT & ~filters.COMMAND, addmovie_extra)],
+            ADD_MOVIE_DL480:   [MessageHandler(filters.TEXT & ~filters.COMMAND, addmovie_dl480)],
+            ADD_MOVIE_DL720:   [MessageHandler(filters.TEXT & ~filters.COMMAND, addmovie_dl720)],
+            ADD_MOVIE_DL1080:  [MessageHandler(filters.TEXT & ~filters.COMMAND, addmovie_dl1080)],
+            ADD_MOVIE_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND, addmovie_confirm)],
+        },
+        fallbacks=[CommandHandler("cancel", cmd_cancel)],
+    ))
+
+    # Add series conv
+    app.add_handler(ConversationHandler(
+        entry_points=[CommandHandler("addseries", cmd_addseries)],
+        states={
+            ADD_SERIES_TMDB:     [MessageHandler(filters.TEXT & ~filters.COMMAND, addseries_tmdb)],
+            ADD_SERIES_EPISODES: [MessageHandler(filters.TEXT & ~filters.COMMAND, addseries_episodes)],
+            ADD_SERIES_CONFIRM:  [MessageHandler(filters.TEXT & ~filters.COMMAND, addseries_confirm)],
+        },
+        fallbacks=[CommandHandler("cancel", cmd_cancel)],
+    ))
+
+    # Add collection conv
+    app.add_handler(ConversationHandler(
+        entry_points=[CommandHandler("addcollection", cmd_addcollection)],
+        states={
+            ADD_COL_ID:     [MessageHandler(filters.TEXT & ~filters.COMMAND, addcol_id)],
+            ADD_COL_NAME:   [MessageHandler(filters.TEXT & ~filters.COMMAND, addcol_name)],
+            ADD_COL_BANNER: [MessageHandler(filters.TEXT & ~filters.COMMAND, addcol_banner)],
+            ADD_COL_CONFIRM:[MessageHandler(filters.TEXT & ~filters.COMMAND, addcol_confirm)],
+        },
+        fallbacks=[CommandHandler("cancel", cmd_cancel)],
+    ))
+
+    # Delete convs
+    app.add_handler(ConversationHandler(
+        entry_points=[CommandHandler("delmovie", cmd_delmovie)],
+        states={DEL_MOVIE_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, delmovie_id)]},
+        fallbacks=[CommandHandler("cancel", cmd_cancel)],
+    ))
+    app.add_handler(ConversationHandler(
+        entry_points=[CommandHandler("delseries", cmd_delseries)],
+        states={DEL_SERIES_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, delseries_id)]},
+        fallbacks=[CommandHandler("cancel", cmd_cancel)],
+    ))
+    app.add_handler(ConversationHandler(
+        entry_points=[CommandHandler("delcollection", cmd_delcollection)],
+        states={DEL_COL_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, delcol_id)]},
+        fallbacks=[CommandHandler("cancel", cmd_cancel)],
+    ))
+
+    # Edit movie conv
+    app.add_handler(ConversationHandler(
+        entry_points=[CommandHandler("editmovie", cmd_editmovie)],
+        states={
+            EDIT_MOVIE_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, editmovie_id)],
+            EDIT_FIELD:    [CallbackQueryHandler(editmovie_field_cb, pattern="^editfield_")],
+            EDIT_VALUE:    [MessageHandler(filters.TEXT & ~filters.COMMAND, editmovie_value)],
+        },
+        fallbacks=[CommandHandler("cancel", cmd_cancel)],
+    ))
+
+    # TMDB search conv
+    app.add_handler(ConversationHandler(
+        entry_points=[CommandHandler("tmdb", cmd_tmdb)],
+        states={
+            SEARCH_TYPE:   [CallbackQueryHandler(tmdb_type_cb, pattern="^tmdb_")],
+            SEARCH_TMDB_Q: [MessageHandler(filters.TEXT & ~filters.COMMAND, tmdb_query)],
+        },
+        fallbacks=[CommandHandler("cancel", cmd_cancel)],
+    ))
+
+    # Simple commands
+    app.add_handler(CommandHandler("start",         cmd_start))
+    app.add_handler(CommandHandler("help",          cmd_help))
+    app.add_handler(CommandHandler("status",        cmd_status))
+    app.add_handler(CommandHandler("stats",         cmd_stats))
+    app.add_handler(CommandHandler("movies",        cmd_movies))
+    app.add_handler(CommandHandler("series",        cmd_series))
+    app.add_handler(CommandHandler("collections",   cmd_collections))
+    app.add_handler(CommandHandler("backup",        cmd_backup))
+    app.add_handler(CommandHandler("backupall",     cmd_backupall))
+    app.add_handler(CommandHandler("setbackup",     cmd_setbackup))
+    app.add_handler(CommandHandler("logs",          cmd_logs))
+    app.add_handler(CommandHandler("cancel",        cmd_cancel))
+    app.add_error_handler(on_error)
+
+    # Menu inline callbacks
+    app.add_handler(CallbackQueryHandler(menu_callback, pattern="^menu_"))
+
+    # Scheduler: backup every 2 days
+    scheduler = AsyncIOScheduler(timezone="Asia/Kolkata")
+    scheduler.add_job(
+        perform_backup,
+        trigger="interval",
+        days=2,
+        args=[app],
+        next_run_time=datetime.now() + timedelta(seconds=10),  # first run shortly after start (remove in prod)
+    )
+    scheduler.add_job(
+        auto_ping_services,
+        trigger="interval",
+        minutes=AUTO_PING_INTERVAL_MIN,
+        next_run_time=datetime.now() + timedelta(seconds=30),
+    )
 
 
 # ═══════════════════════════════════════
@@ -992,296 +1120,46 @@ async def web_dashboard(req: web.Request) -> web.Response:
     except Exception as e:
         b_err = str(e)
 
-    movies = await api_get("/api/movies") or []
-    series = await api_get("/api/series") or []
-    cols   = await api_get("/api/collections") or {}
+    async def on_startup(application: Application):
+        global BACKUP_CHAT_TARGET
+        BACKUP_CHAT_TARGET = load_backup_chat_target()
+        nonlocal web_runner
+        web_app = web.Application()
+        web_app.router.add_get("/", web_health_handler)
+        web_app.router.add_get("/health", web_json_health_handler)
+        web_app.router.add_get("/backup/all", web_backup_all_handler)
+        web_app.router.add_get("/logs", web_logs_handler)
+        web_runner = web.AppRunner(web_app)
+        await web_runner.setup()
+        site = web.TCPSite(web_runner, host=WEB_HOST, port=WEB_PORT)
+        await site.start()
+        await register_bot_commands(application)
+        if not BACKUP_CHAT_TARGET:
+            logger.warning("No backup chat configured. Use /setbackup <chat_id>.")
+            for admin_id in ADMIN_IDS[:3]:
+                try:
+                    await application.bot.send_message(
+                        admin_id,
+                        "⚠️ Backup channel is not configured.\nUse `/setbackup <chat_id>` to enable auto backups.",
+                        parse_mode=ParseMode.MARKDOWN,
+                    )
+                except Exception as e:
+                    logger.warning("Could not notify admin %s about backup setup: %s", admin_id, e)
+        scheduler.start()
+        logger.info("Scheduler started — backup every 2 days, auto ping every %s minutes.", AUTO_PING_INTERVAL_MIN)
+        logger.info("Web service started on %s:%s", WEB_HOST, WEB_PORT)
 
-    bk = LAST_BACKUP_AT.strftime("%Y-%m-%d %H:%M") if LAST_BACKUP_AT else "Never"
-    pg = LAST_PING_AT.strftime("%Y-%m-%d %H:%M")   if LAST_PING_AT   else "Never"
-
-    lat_w = min(max(int(b_ms / 8), 4), 100)
-    lat_c = "#10b981" if b_ms < 400 else ("#fbbf24" if b_ms < 1000 else "#ef4444")
-    s_cls = "ok" if b_status == "online" else ("warn" if b_status == "degraded" else "bad")
-    s_ico = {"online": "🟢", "degraded": "🟡", "offline": "🔴"}.get(b_status, "⚪")
-
-    mv_rows = "".join(
-        f"<tr><td><code>{m.get('id','?')}</code></td>"
-        f"<td><code>{m.get('tmdb_id','?')}</code></td>"
-        f"<td>{m.get('extras','') or '—'}</td>"
-        f"<td>{'✅' if m.get('downloads') else '—'}</td></tr>"
-        for m in movies[:8]
-    )
-    sr_rows = "".join(
-        f"<tr><td><code>{s.get('id','?')}</code></td>"
-        f"<td><code>{s.get('tmdb_id','?')}</code></td>"
-        f"<td>{len(s.get('seasons',[]))}</td></tr>"
-        for s in series[:8]
-    )
-    co_rows = "".join(
-        f"<tr><td><code>{k}</code></td><td>{v.get('name','?')}</td>"
-        f"<td>{len(v.get('movies',[]))}</td></tr>"
-        for k, v in list(cols.items())[:8]
-    )
-    empty = "<tr><td colspan='4' style='text-align:center;color:var(--muted);padding:1.5rem'>No data</td></tr>"
-
-    html = f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>SCFiles · Dashboard</title>
-  <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@400;600;700&display=swap" rel="stylesheet">
-  <style>
-    :root{{--bg:#060a12;--surface:#0c1220;--surface2:#111b2e;--border:#1c2840;
-      --text:#dde8f8;--muted:#5d7a9e;--ok:#00e5a0;--warn:#ffb340;--bad:#ff4d6d;
-      --accent:#4f8ef7;--accent2:#7c5bf7;--mono:'Space Mono',monospace;--sans:'DM Sans',sans-serif;}}
-    *{{box-sizing:border-box;margin:0;padding:0}}
-    body{{background:var(--bg);color:var(--text);font-family:var(--sans);min-height:100vh;padding:2rem 1.5rem;max-width:1100px;margin:0 auto;}}
-    body::before{{content:'';position:fixed;inset:0;z-index:-1;
-      background:radial-gradient(ellipse 80% 60% at 10% 10%,rgba(79,142,247,.07),transparent 60%),
-                 radial-gradient(ellipse 60% 50% at 90% 80%,rgba(124,91,247,.06),transparent 60%);}}
-    header{{display:flex;justify-content:space-between;align-items:center;margin-bottom:2rem;flex-wrap:wrap;gap:1rem;}}
-    .logo{{display:flex;align-items:center;gap:.75rem;}}
-    .logo-icon{{width:42px;height:42px;border-radius:10px;background:linear-gradient(135deg,var(--accent),var(--accent2));display:flex;align-items:center;justify-content:center;font-size:1.3rem;}}
-    h1{{font-family:var(--mono);font-size:1.25rem;}} h1 span{{color:var(--accent);}}
-    .live{{display:flex;align-items:center;gap:6px;font-size:.78rem;color:var(--muted);font-family:var(--mono);}}
-    .dot{{width:7px;height:7px;border-radius:50%;background:var(--ok);animation:blink 1.8s infinite;}}
-    @keyframes blink{{0%,100%{{opacity:1}}50%{{opacity:.2}}}}
-    .kpi-row{{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:1rem;margin-bottom:1.5rem;}}
-    .kpi{{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:1.2rem 1.4rem;transition:background .2s;}}
-    .kpi:hover{{background:var(--surface2);}}
-    .kpi-label{{font-size:.7rem;font-family:var(--mono);color:var(--muted);text-transform:uppercase;letter-spacing:1px;}}
-    .kpi-val{{font-size:2.2rem;font-weight:700;margin-top:.25rem;font-family:var(--mono);
-      background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;}}
-    .kpi-sub{{font-size:.7rem;color:var(--muted);margin-top:.15rem;}}
-    .panels{{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1.5rem;}}
-    @media(max-width:600px){{.panels{{grid-template-columns:1fr;}}}}
-    .panel{{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:1.4rem;}}
-    .panel-title{{font-family:var(--mono);font-size:.72rem;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin-bottom:1rem;}}
-    .row{{display:flex;justify-content:space-between;align-items:center;padding:.45rem 0;border-bottom:1px solid rgba(255,255,255,.04);font-size:.86rem;}}
-    .row:last-child{{border-bottom:none;}}
-    .label{{color:var(--muted);}} .tag{{font-family:var(--mono);font-size:.76rem;background:rgba(255,255,255,.05);padding:2px 7px;border-radius:5px;}}
-    .ok{{color:var(--ok);font-weight:600;}} .warn{{color:var(--warn);font-weight:600;}} .bad{{color:var(--bad);font-weight:600;}}
-    .lat-track{{height:3px;background:rgba(255,255,255,.07);border-radius:2px;margin-top:.8rem;overflow:hidden;}}
-    .lat-fill{{height:100%;border-radius:2px;}}
-    .section{{margin-bottom:1.5rem;}}
-    .section-title{{font-family:var(--mono);font-size:.72rem;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin-bottom:.75rem;}}
-    .table-wrap{{background:var(--surface);border:1px solid var(--border);border-radius:14px;overflow:hidden;}}
-    table{{width:100%;border-collapse:collapse;font-size:.84rem;}}
-    th{{background:var(--surface2);padding:.65rem 1rem;text-align:left;font-family:var(--mono);font-size:.68rem;text-transform:uppercase;letter-spacing:.8px;color:var(--muted);}}
-    td{{padding:.6rem 1rem;border-top:1px solid rgba(255,255,255,.04);}}
-    tr:hover td{{background:rgba(255,255,255,.02);}}
-    code{{font-family:var(--mono);font-size:.76rem;color:var(--accent);background:rgba(79,142,247,.1);padding:1px 5px;border-radius:4px;}}
-    .actions{{display:flex;gap:.75rem;flex-wrap:wrap;margin-bottom:1.5rem;}}
-    .btn{{display:inline-flex;align-items:center;gap:.4rem;padding:.6rem 1.1rem;border-radius:9px;font-weight:600;font-size:.84rem;text-decoration:none;transition:all .2s;border:1px solid transparent;}}
-    .btn-primary{{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;box-shadow:0 4px 16px rgba(79,142,247,.2);}}
-    .btn-primary:hover{{transform:translateY(-2px);}}
-    .btn-outline{{border-color:var(--border);color:var(--text);background:var(--surface);}}
-    .btn-outline:hover{{border-color:var(--accent);color:var(--accent);}}
-    footer{{text-align:center;color:var(--muted);font-size:.72rem;font-family:var(--mono);padding-top:2rem;border-top:1px solid var(--border);margin-top:1rem;}}
-  </style>
-</head>
-<body>
-<header>
-  <div class="logo">
-    <div class="logo-icon">🎛</div>
-    <div><h1>SC<span>Files</span></h1><div style="font-size:.68rem;color:var(--muted);font-family:var(--mono)">backend manager</div></div>
-  </div>
-  <div class="live"><div class="dot"></div>LIVE · {now.strftime("%H:%M:%S")}</div>
-</header>
-
-<div class="kpi-row">
-  <div class="kpi"><div class="kpi-label">Movies</div><div class="kpi-val">{len(movies)}</div><div class="kpi-sub">in database</div></div>
-  <div class="kpi"><div class="kpi-label">Series</div><div class="kpi-val">{len(series)}</div><div class="kpi-sub">in database</div></div>
-  <div class="kpi"><div class="kpi-label">Collections</div><div class="kpi-val">{len(cols)}</div><div class="kpi-sub">in database</div></div>
-  <div class="kpi"><div class="kpi-label">Latency</div>
-    <div class="kpi-val" style="font-size:1.5rem">{b_ms:.0f}<span style="font-size:.9rem;-webkit-text-fill-color:var(--muted)">ms</span></div>
-    <div class="kpi-sub">backend ping</div></div>
-</div>
-
-<div class="panels">
-  <div class="panel">
-    <div class="panel-title">🤖 Bot</div>
-    <div class="row"><span class="label">Status</span><span class="ok">ONLINE</span></div>
-    <div class="row"><span class="label">Uptime</span><span class="tag">{uptime}</span></div>
-    <div class="row"><span class="label">Last Backup</span><span class="tag">{bk}</span></div>
-    <div class="row"><span class="label">Last Ping</span><span class="tag">{pg}</span></div>
-    <div class="row"><span class="label">Backup Chat</span><span class="tag">{BACKUP_TARGET or '—'}</span></div>
-  </div>
-  <div class="panel">
-    <div class="panel-title">🌐 Backend</div>
-    <div class="row"><span class="label">Status</span><span class="{s_cls}">{s_ico} {b_status.upper()}</span></div>
-    <div class="row"><span class="label">HTTP Code</span><span class="tag">{b_code}</span></div>
-    <div class="row"><span class="label">Latency</span><span class="tag">{b_ms:.0f}ms</span></div>
-    <div class="row"><span class="label">URL</span><span class="tag" style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{BACKEND_URL}</span></div>
-    {"<div class='row'><span class='label'>Error</span><span class='bad' style='font-size:.75rem'>"+b_err[:60]+"</span></div>" if b_err else ""}
-    <div class="lat-track"><div class="lat-fill" style="width:{lat_w}%;background:{lat_c}"></div></div>
-  </div>
-</div>
-
-<div class="actions">
-  <a class="btn btn-primary" href="/backup/all">📦 Download Backup ZIP</a>
-  <a class="btn btn-outline"  href="/logs">📋 View Logs</a>
-  <a class="btn btn-outline"  href="/health">📡 JSON Health</a>
-  <a class="btn btn-outline"  href="javascript:location.reload()">🔄 Refresh</a>
-</div>
-
-<div class="section">
-  <div class="section-title">🎬 Recent Movies</div>
-  <div class="table-wrap"><table>
-    <thead><tr><th>ID</th><th>TMDB ID</th><th>Extras</th><th>Links</th></tr></thead>
-    <tbody>{mv_rows or empty}</tbody>
-  </table></div>
-</div>
-<div class="section">
-  <div class="section-title">📺 Recent Series</div>
-  <div class="table-wrap"><table>
-    <thead><tr><th>ID</th><th>TMDB ID</th><th>Seasons</th></tr></thead>
-    <tbody>{sr_rows or empty}</tbody>
-  </table></div>
-</div>
-<div class="section">
-  <div class="section-title">🗂 Collections</div>
-  <div class="table-wrap"><table>
-    <thead><tr><th>ID</th><th>Name</th><th>Movies</th></tr></thead>
-    <tbody>{co_rows or empty}</tbody>
-  </table></div>
-</div>
-
-<footer>SCFiles Bot Dashboard · Auto-refresh 60s · {now.strftime("%Y-%m-%d %H:%M:%S")}</footer>
-<script>setTimeout(()=>location.reload(),60000);</script>
-</body></html>"""
-    return web.Response(text=html, content_type="text/html")
-
-
-async def web_health_json(req: web.Request) -> web.Response:
-    now     = datetime.now()
-    backend = {"status": "offline", "http_status": None, "latency_ms": None, "error": None}
-    try:
-        s = await get_session()
-        t0 = datetime.now()
-        async with s.get(BACKEND_URL, timeout=aiohttp.ClientTimeout(total=10)) as r:
-            backend["http_status"] = r.status
-            backend["latency_ms"]  = round((datetime.now() - t0).total_seconds() * 1000, 2)
-            backend["status"]      = "online" if r.status == 200 else "degraded"
-    except Exception as e:
-        backend["error"] = str(e)
-    movies = await api_get("/api/movies") or []
-    series = await api_get("/api/series") or []
-    cols   = await api_get("/api/collections") or {}
-    return web.json_response({
-        "bot":     {"status": "online",
-                    "uptime_seconds": int((now - BOT_STARTED_AT).total_seconds()),
-                    "last_backup_at": LAST_BACKUP_AT.isoformat() if LAST_BACKUP_AT else None,
-                    "last_ping_at":   LAST_PING_AT.isoformat()   if LAST_PING_AT   else None},
-        "backend": backend,
-        "db":      {"movies": len(movies), "series": len(series), "collections": len(cols)},
-        "time":    now.isoformat(),
-    })
-
-async def web_backup_zip(req: web.Request) -> web.Response:
-    data, ts = await create_zip()
-    return web.Response(body=data, headers={
-        "Content-Type":        "application/zip",
-        "Content-Disposition": f'attachment; filename="backup_all_{ts}.zip"',
-    })
-
-async def web_logs(req: web.Request) -> web.Response:
-    if not os.path.exists(LOG_FILE):
-        return web.Response(text="No log file yet.", content_type="text/plain")
-    with open(LOG_FILE, "rb") as f:
-        f.seek(0, 2); size = f.tell()
-        f.seek(max(0, size - 32768))  # last 32 KB
-        tail = f.read()
-    return web.Response(body=tail, headers={
-        "Content-Type":        "text/plain; charset=utf-8",
-        "Content-Disposition": "inline; filename=bot.log",
-    })
-
-
-# ═══════════════════════════════════════
-#  SCHEDULER JOBS
-# ═══════════════════════════════════════
-async def job_backup():
-    ok, info = await perform_backup(pyro)
-    logger.info("Scheduled backup → ok=%s info=%s", ok, info)
-
-async def job_ping():
-    global LAST_PING_AT
-    urls = [BACKEND_URL]
-    if BOT_WEB_URL:
-        urls.append(f"{BOT_WEB_URL}/health")
-    s = await get_session()
-    for url in urls:
-        try:
-            async with s.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
-                logger.info("Ping %s → %s", url, r.status)
-        except Exception as e:
-            logger.warning("Ping failed %s: %s", url, e)
-    LAST_PING_AT = datetime.now()
-
-
-# ═══════════════════════════════════════
-#  MAIN
-# ═══════════════════════════════════════
-async def main():
-    global BACKUP_TARGET
-    BACKUP_TARGET = load_backup_target()
-
-    logger.info("=" * 60)
-    logger.info("SCFiles Bot starting…")
-    logger.info("Backend URL : %s", BACKEND_URL)
-    logger.info("Admin IDs   : %s", ADMIN_IDS or "ALL (open)")
-    logger.info("Backup chat : %s", BACKUP_TARGET or "NOT SET")
-    logger.info("Web port    : %s", WEB_PORT)
-    logger.info("=" * 60)
-
-    # Web server
-    web_app = web.Application()
-    web_app.router.add_get("/",           web_dashboard)
-    web_app.router.add_get("/health",     web_health_json)
-    web_app.router.add_get("/backup/all", web_backup_zip)
-    web_app.router.add_get("/logs",       web_logs)
-    runner = web.AppRunner(web_app)
-    await runner.setup()
-    await web.TCPSite(runner, WEB_HOST, WEB_PORT).start()
-    logger.info("Web dashboard running on %s:%s", WEB_HOST, WEB_PORT)
-
-    # Scheduler
-    scheduler = AsyncIOScheduler(timezone="Asia/Kolkata")
-    scheduler.add_job(job_backup, "interval", days=2)
-    scheduler.add_job(job_ping,   "interval", minutes=AUTO_PING_MIN,
-                      next_run_time=datetime.now() + timedelta(seconds=30))
-    scheduler.start()
-    logger.info("Scheduler started — backup every 2 days, ping every %d min", AUTO_PING_MIN)
-
-    # Start Pyrogram
-    await pyro.start()
-    me = await pyro.get_me()
-    logger.info("Bot online: @%s (id=%s)", me.username, me.id)
-
-    if not BACKUP_TARGET:
-        logger.warning("No backup chat configured — use /setbackup <chat_id>")
-        for aid in ADMIN_IDS[:3]:
-            try:
-                await pyro.send_message(
-                    aid,
-                    "⚠️ **Backup channel not configured.**\n"
-                    "Use `/setbackup <chat_id>` to enable auto-backups."
-                )
-            except Exception:
-                pass
-
-    try:
-        await asyncio.Event().wait()   # run forever
-    finally:
-        logger.info("Shutting down…")
-        global _SESSION
-        if _SESSION and not _SESSION.closed:
-            await _SESSION.close()
-        await pyro.stop()
-        await runner.cleanup()
+    async def on_shutdown(application: Application):
+        if web_runner:
+            await web_runner.cleanup()
         scheduler.shutdown(wait=False)
+        logger.info("Scheduler and web service shut down.")
 
+    app.post_init = on_startup
+    app.post_shutdown = on_shutdown
+
+    logger.info("Bot starting…")
+    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 if __name__ == "__main__":
     asyncio.run(main())
