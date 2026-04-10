@@ -22,6 +22,7 @@ A Telegram bot to fully manage your SCFiles backend — movies, series, collecti
 | 🤖 Auto Command Sync | Registers Telegram bot commands automatically on startup |
 | ⚙️ Backup Channel Setup | Configure backup target chat at runtime with `/setbackup` |
 | 📋 Runtime Logs | `/logs` command + `/logs` web endpoint for recent log tail |
+| 📌 Movie Position | Choose Top/Bottom insertion while adding movies |
 | 🔐 Admin-only | Restrict write operations to specific user IDs |
 
 ---
@@ -53,6 +54,7 @@ cp .env.example .env
 | `BOT_WEB_URL` | Public URL of this bot deployment for self-ping (example: `https://your-bot.onrender.com`) |
 | `AUTO_PING_INTERVAL_MIN` | Auto ping interval in minutes (default: `5`) |
 | `LOG_FILE` | Bot log file path used by `/logs` and `/logs` web endpoint (default: `bot.log`) |
+| Timezone | Uses `Asia/Kolkata` (`pytz`) for scheduler and dashboard timestamps |
 
 ### 3. Install & Run
 
@@ -94,6 +96,27 @@ The bot also starts a small web service:
 - `/backup/all` → Download one ZIP with movies, series, and collections JSON
 - `/logs` → View latest bot log tail in browser
 
+/tmdb          — Search TMDB for movie or TV show metadata
+/backup        — Trigger a manual backup now
+/backupall     — Download all backend data as one ZIP
+/setbackup     — Set backup channel/chat ID
+/logs          — Download recent bot logs
+/cancel        — Cancel current operation
+```
+
+`/backup` now reports the exact destination chat ID and shows a setup hint if backup target is not configured.
+
+---
+
+## 🌐 Web Service
+
+The bot also starts a small web service:
+
+- `/` → HTML dashboard with bot/backend health + movie/series/collection counters
+- `/health` → JSON health payload
+- `/backup/all` → Download one ZIP with movies, series, and collections JSON
+- `/logs` → View latest bot log tail in browser
+
 Use `BOT_WEB_URL` so the auto ping job can hit your bot deployment and help keep it awake.
 
 ---
@@ -105,6 +128,14 @@ Use `BOT_WEB_URL` so the auto ping job can hit your bot deployment and help keep
 | `/` | Full HTML dashboard — KPIs, status panels, data tables |
 | `/health` | JSON health endpoint |
 | `/backup/all` | Download backup ZIP directly from browser |
+
+You can change the destination at runtime:
+
+```bash
+/setbackup <chat_id>
+```
+
+This value is persisted in `.backup_config.json` (configurable via `BACKUP_CONFIG_FILE`).
 
 You can change the destination at runtime:
 

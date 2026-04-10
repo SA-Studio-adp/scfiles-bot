@@ -8,6 +8,7 @@ import io
 import logging
 import zipfile
 import aiohttp
+import pytz
 from datetime import datetime, timedelta
 
 import aiohttp
@@ -34,6 +35,11 @@ if not logger.handlers:
     logger.addHandler(_stream_handler)
     logger.addHandler(_file_handler)
 
+IST_TZ = pytz.timezone("Asia/Kolkata")
+
+def now_ist() -> datetime:
+    return datetime.now(IST_TZ)
+
 # ──────────────────────────── CONFIG ────────────────────────────
 TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
 BACKEND_URL      = os.environ["BACKEND_URL"].rstrip("/")
@@ -48,7 +54,7 @@ AUTO_PING_INTERVAL_MIN = int(os.environ.get("AUTO_PING_INTERVAL_MIN", "5"))
 
 TMDB_BASE        = "https://api.themoviedb.org/3"
 TMDB_IMG         = "https://image.tmdb.org/t/p/w500"
-BOT_STARTED_AT   = datetime.now()
+BOT_STARTED_AT   = now_ist()
 LAST_BACKUP_AT   = None
 LAST_AUTO_PING_AT = None
 BACKUP_CHAT_TARGET = BACKUP_CHAT_ID
@@ -78,13 +84,13 @@ BOT_COMMANDS = [
 # ──────────────────────────── STATES ────────────────────────────
 (
     ADD_MOVIE_TMDB, ADD_MOVIE_EXTRA, ADD_MOVIE_DL480, ADD_MOVIE_DL720,
-    ADD_MOVIE_DL1080, ADD_MOVIE_CONFIRM,
+    ADD_MOVIE_DL1080, ADD_MOVIE_POS, ADD_MOVIE_CONFIRM,
     ADD_SERIES_TMDB, ADD_SERIES_EPISODES, ADD_SERIES_CONFIRM,
     ADD_COL_ID, ADD_COL_NAME, ADD_COL_BANNER, ADD_COL_CONFIRM,
     DEL_MOVIE_ID, DEL_SERIES_ID, DEL_COL_ID,
     SEARCH_TMDB_Q, SEARCH_TYPE,
     EDIT_MOVIE_ID, EDIT_FIELD, EDIT_VALUE,
-) = range(21)
+) = range(22)
 
 # ──────────────────────────── HELPERS ────────────────────────────
 def is_admin(user_id: int) -> bool:
@@ -311,7 +317,7 @@ def save_backup_chat_target(chat_id: str):
 # ──────────────────────────── SERVER STATUS ────────────────────────────
 async def check_status(update_or_query, is_query=False):
     send = update_or_query.edit_message_text if is_query else update_or_query.message.reply_text
-    now = datetime.now()
+    now = now_ist()
     uptime = now - BOT_STARTED_AT
     bot_health = "🟢 Online"
     try:
@@ -357,7 +363,7 @@ async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"🎬 Movies: *{len(movies)}*\n"
         f"📺 Series: *{len(series)}*\n"
         f"🗂 Collections: *{len(collections)}*\n\n"
-        f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        f"🕐 {now_ist().strftime('%Y-%m-%d %H:%M:%S')}"
     )
     await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
@@ -400,39 +406,132 @@ async def cmd_series_list(_, msg: Message):
 async def cmd_collections(_, msg: Message):
     cols = await api_get("/api/collections") or {}
     if not cols:
-        return await msg.reply("No collections found.")
-    lines = [
-        f"• `{k}` — {v.get('name','?')} ({len(v.get('movies',[]))} movies)"
-        for k, v in list(cols.items())[:15]
-    ]
-    await msg.reply("🗂 **Collections**\n\n" + "\n".join(lines))
-
-@pyro.on_message(filters.command("logs") & filters.private)
-async def cmd_logs(_, msg: Message):
-    if not is_admin(msg.from_user.id):
-        return await msg.reply("⛔ Access denied.")
-    if not os.path.exists(LOG_FILE):
-        return await msg.reply("📭 No log file yet.")
-    with open(LOG_FILE, "rb") as f:
-        f.seek(0, 2)
-        size = f.tell()
-        f.seek(max(0, size - 8192))
-        tail = f.read()
-    buf = io.BytesIO(tail)
-    ts  = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    buf.name = f"scfiles_logs_{ts}.txt"
-    await msg.reply_document(buf, caption=f"📋 Last {len(tail)//1024 or 1}KB of logs · {ts}")
-
-@pyro.on_message(filters.command("backup") & filters.private)
-async def cmd_backup(_, msg: Message):
-    if not is_admin(msg.from_user.id):
-        return await msg.reply("⛔ Access denied.")
-    m = await msg.reply("💾 Starting backup…")
-    dest = BACKUP_TARGET or str(msg.chat.id)
-    ok, info = await perform_backup(pyro, dest)
-    await m.edit_text(
-        f"✅ Backup sent to `{info}`." if ok else f"❌ Backup failed:\n`{info}`"
+        await update.message.reply_text("No collections found.")
+        return
+    lines = [f"• `{k}` — {v.get('name','?')} ({len(v.get('movies',[]))} movies)"
+             for k, v in list(cols.items())[:15]]
+    await update.message.reply_text(
+        f"🗂 *Collections*\n\n" + "\n".join(lines),
+        parse_mode=ParseMode.MARKDOWN
     )
+
+# ──────────────────────────── ADD MOVIE ────────────────────────────
+@admin_only
+async def cmd_addmovie(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🎬 *Add Movie*\n\nEnter the *TMDB Movie ID*:",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    return ADD_MOVIE_TMDB
+
+async def addmovie_tmdb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    tid = update.message.text.strip()
+    if not tid.isdigit():
+        await update.message.reply_text("❌ Please enter a valid numeric TMDB ID.")
+        return ADD_MOVIE_TMDB
+    ctx.user_data["new_movie"] = {"tmdb_id": int(tid)}
+    info = await tmdb_movie(int(tid))
+    if info:
+        ctx.user_data["new_movie"]["id"] = info.get("title","").lower().replace(" ","-")
+        poster = poster_url(info.get("poster_path"))
+        caption = fmt_tmdb_movie(info) + f"\n\nSuggested ID: `{ctx.user_data['new_movie']['id']}`\n\nEnter *extras* (e.g. `PreDVD - Tamil Audio`) or skip with `-`:"
+        if poster:
+            await update.message.reply_photo(poster, caption=caption, parse_mode=ParseMode.MARKDOWN)
+        else:
+            await update.message.reply_text(caption, parse_mode=ParseMode.MARKDOWN)
+    else:
+        await update.message.reply_text("⚠️ TMDB not found. Enter *extras* or `-` to skip:")
+    return ADD_MOVIE_EXTRA
+
+async def addmovie_extra(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    val = update.message.text.strip()
+    ctx.user_data["new_movie"]["extras"] = "" if val == "-" else val
+    await update.message.reply_text("📥 Enter *480p download link* (or `-` to skip):", parse_mode=ParseMode.MARKDOWN)
+    return ADD_MOVIE_DL480
+
+async def addmovie_dl480(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data.setdefault("new_movie", {}).setdefault("downloads", {})
+    val = update.message.text.strip()
+    if val != "-": ctx.user_data["new_movie"]["downloads"]["480"] = val
+    await update.message.reply_text("📥 Enter *720p download link* (or `-` to skip):", parse_mode=ParseMode.MARKDOWN)
+    return ADD_MOVIE_DL720
+
+async def addmovie_dl720(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    val = update.message.text.strip()
+    if val != "-": ctx.user_data["new_movie"]["downloads"]["720"] = val
+    await update.message.reply_text("📥 Enter *1080p download link* (or `-` to skip):", parse_mode=ParseMode.MARKDOWN)
+    return ADD_MOVIE_DL1080
+
+async def addmovie_dl1080(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    val = update.message.text.strip()
+    if val != "-": ctx.user_data["new_movie"]["downloads"]["1080"] = val
+    kb = [[
+        InlineKeyboardButton("⬆️ Top", callback_data="moviepos_top"),
+        InlineKeyboardButton("⬇️ Bottom", callback_data="moviepos_bottom"),
+    ]]
+    await update.message.reply_text(
+        "📌 Choose where this movie should be inserted:",
+        reply_markup=InlineKeyboardMarkup(kb),
+    )
+    return ADD_MOVIE_POS
+
+async def addmovie_pos_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    pos = update.callback_query.data.replace("moviepos_", "")
+    movie = ctx.user_data.get("new_movie", {})
+    movie["position"] = "top" if pos == "top" else "bottom"
+    movie = ctx.user_data["new_movie"]
+    summary = (
+        f"✅ *Confirm Movie*\n\n"
+        f"ID: `{movie.get('id','?')}`\n"
+        f"TMDB: `{movie.get('tmdb_id','?')}`\n"
+        f"Extras: `{movie.get('extras','')}`\n"
+        f"Position: `{movie.get('position','top')}`\n"
+        f"Downloads: `{json.dumps(movie.get('downloads', {}))}`\n\n"
+        f"Type *yes* to confirm or *no* to cancel:"
+    )
+    await update.callback_query.edit_message_text(summary, parse_mode=ParseMode.MARKDOWN)
+    return ADD_MOVIE_CONFIRM
+
+async def addmovie_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.message.text.strip().lower() != "yes":
+        await update.message.reply_text("❌ Cancelled.")
+        ctx.user_data.clear()
+        return ConversationHandler.END
+    movie = ctx.user_data.pop("new_movie", {})
+    movie.setdefault("subtitles", {})
+    movie.setdefault("position", "bottom")
+    result = await api_post("/api/movies", movie)
+    if result and result.get("success"):
+        await update.message.reply_text(f"✅ Movie added! Total movies: *{result['count']}*", parse_mode=ParseMode.MARKDOWN)
+    else:
+        await update.message.reply_text(f"❌ Failed to add movie.\n`{result}`", parse_mode=ParseMode.MARKDOWN)
+    return ConversationHandler.END
+
+# ──────────────────────────── ADD SERIES ────────────────────────────
+@admin_only
+async def cmd_addseries(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("📺 *Add Series*\n\nEnter the *TMDB TV Show ID*:", parse_mode=ParseMode.MARKDOWN)
+    return ADD_SERIES_TMDB
+
+async def addseries_tmdb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    tid = update.message.text.strip()
+    if not tid.isdigit():
+        await update.message.reply_text("❌ Please enter a valid numeric TMDB ID.")
+        return ADD_SERIES_TMDB
+    ctx.user_data["new_series"] = {"tmdb_id": str(tid), "seasons": []}
+    info = await tmdb_tv(int(tid))
+    if info:
+        ctx.user_data["new_series"]["id"] = info.get("name","").lower().replace(" ","-")
+        poster = poster_url(info.get("poster_path"))
+        caption = fmt_tmdb_tv(info) + f"\n\nSuggested ID: `{ctx.user_data['new_series']['id']}`\n\n📋 Now paste *episode data* as JSON:\n\n```json\n[\n  {{\n    \"season_number\": 1,\n    \"episodes\": [\n      {{\"ep_number\":1,\"links\":{{\"360p\":\"URL\",\"720p\":\"URL\"}},\"subtitle\":\"\"}}\n    ]\n  }}\n]\n```"
+        if poster:
+            await update.message.reply_photo(poster, caption=caption, parse_mode=ParseMode.MARKDOWN)
+        else:
+            await update.message.reply_text(caption, parse_mode=ParseMode.MARKDOWN)
+    else:
+        await update.message.reply_text("⚠️ TMDB not found. Paste episode JSON:")
+    return ADD_SERIES_EPISODES
 
 @pyro.on_message(filters.command("backupzip") & filters.private)
 async def cmd_backupzip(_, msg: Message):
@@ -604,9 +703,9 @@ async def perform_backup(app: Application, target_chat_id: str | int | None = No
         "series.json":      "/api/series",
         "collections.json": "/api/collections",
     }
-    ts = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    ts = now_ist().strftime("%Y-%m-%d_%H-%M")
     try:
-        await app.bot.send_message(resolved_target, f"💾 *Auto-Backup* — {ts}", parse_mode=ParseMode.MARKDOWN)
+        await app.bot.send_message(resolved_target, f"💾 Auto-Backup — {ts}")
         for filename, path in endpoints.items():
             data = await api_get(path)
             if data is not None:
@@ -616,10 +715,9 @@ async def perform_backup(app: Application, target_chat_id: str | int | None = No
                     resolved_target,
                     document=content,
                     filename=fname,
-                    caption=f"📦 `{fname}`",
-                    parse_mode=ParseMode.MARKDOWN,
+                    caption=f"📦 {fname}",
                 )
-        LAST_BACKUP_AT = datetime.now()
+        LAST_BACKUP_AT = now_ist()
         logger.info("Backup completed at %s and sent to %s", ts, resolved_target)
         return True, resolved_target
     except Exception as e:
@@ -642,7 +740,7 @@ async def collect_backup_payloads() -> dict[str, bytes]:
 
 async def create_backup_zip_bytes() -> tuple[bytes, str]:
     payloads = await collect_backup_payloads()
-    ts = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    ts = now_ist().strftime("%Y-%m-%d_%H-%M")
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for fname, content in payloads.items():
@@ -664,10 +762,10 @@ async def auto_ping_services():
                 except Exception as e:
                     logger.warning("Auto ping failed for %s (%s): %s", name, url, e)
     finally:
-        LAST_AUTO_PING_AT = datetime.now()
+        LAST_AUTO_PING_AT = now_ist()
 
 async def web_health_handler(request: web.Request) -> web.Response:
-    now = datetime.now()
+    now = now_ist()
     uptime = str((now - BOT_STARTED_AT)).split(".")[0]
     backend_status = "offline"
     backend_code = "N/A"
@@ -786,7 +884,7 @@ async def web_health_handler(request: web.Request) -> web.Response:
     return web.Response(text=html, content_type="text/html")
 
 async def web_json_health_handler(request: web.Request) -> web.Response:
-    now = datetime.now()
+    now = now_ist()
     backend = {"status": "offline", "http_status": None, "latency_ms": None, "error": None}
     try:
         start = datetime.now()
@@ -815,6 +913,18 @@ async def web_backup_all_handler(request: web.Request) -> web.StreamResponse:
         headers={
             "Content-Type": "application/zip",
             "Content-Disposition": f'attachment; filename="backup_all_{ts}.zip"',
+        },
+    )
+
+async def web_logs_handler(request: web.Request) -> web.StreamResponse:
+    tail = read_log_tail()
+    if not tail:
+        return web.Response(text="No logs available yet.", content_type="text/plain")
+    return web.Response(
+        body=tail,
+        headers={
+            "Content-Type": "text/plain; charset=utf-8",
+            "Content-Disposition": 'inline; filename="bot.log"',
         },
     )
 
@@ -865,6 +975,21 @@ async def cmd_backupall(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ Access denied.")
         return
+    await update.message.reply_text("💾 Starting backup…")
+    fallback_chat = str(update.effective_chat.id)
+    success, info = await perform_backup(ctx.application, target_chat_id=BACKUP_CHAT_TARGET or fallback_chat)
+    if success:
+        await update.message.reply_text(f"✅ Backup sent to `{info}`.", parse_mode=ParseMode.MARKDOWN)
+    else:
+        await update.message.reply_text(
+            f"❌ Backup failed: `{info}`\n\nSet/verify backup channel using `/setbackup <chat_id>`.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+
+async def cmd_backupall(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ Access denied.")
+        return
     await update.message.reply_text("📦 Preparing backup ZIP…")
     try:
         zip_bytes, ts = await create_backup_zip_bytes()
@@ -875,6 +1000,37 @@ async def cmd_backupall(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
     except Exception as e:
         await update.message.reply_text(f"❌ Failed to build ZIP backup.\n`{e}`", parse_mode=ParseMode.MARKDOWN)
+
+@admin_only
+async def cmd_setbackup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    global BACKUP_CHAT_TARGET
+    if not ctx.args:
+        current = BACKUP_CHAT_TARGET or "Not configured"
+        await update.message.reply_text(
+            f"📦 Current backup chat: `{current}`\n\nUsage:\n`/setbackup <chat_id>`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+    chat_id = ctx.args[0].strip()
+    BACKUP_CHAT_TARGET = chat_id
+    save_backup_chat_target(chat_id)
+    await update.message.reply_text(
+        f"✅ Backup chat updated to `{chat_id}`.\nAll auto/manual backups will use this chat.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+@admin_only
+async def cmd_logs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    tail = read_log_tail()
+    if not tail:
+        await update.message.reply_text("📭 No logs available yet.")
+        return
+    ts = now_ist().strftime("%Y-%m-%d_%H-%M-%S")
+    await update.message.reply_document(
+        document=tail,
+        filename=f"bot_logs_{ts}.txt",
+        caption=f"📋 Last {max(1, len(tail)//1024)}KB logs",
+    )
 
 @admin_only
 async def cmd_setbackup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1002,6 +1158,7 @@ def main():
             ADD_MOVIE_DL480:   [MessageHandler(filters.TEXT & ~filters.COMMAND, addmovie_dl480)],
             ADD_MOVIE_DL720:   [MessageHandler(filters.TEXT & ~filters.COMMAND, addmovie_dl720)],
             ADD_MOVIE_DL1080:  [MessageHandler(filters.TEXT & ~filters.COMMAND, addmovie_dl1080)],
+            ADD_MOVIE_POS:     [CallbackQueryHandler(addmovie_pos_cb, pattern="^moviepos_")],
             ADD_MOVIE_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND, addmovie_confirm)],
         },
         fallbacks=[CommandHandler("cancel", cmd_cancel)],
@@ -1087,13 +1244,19 @@ def main():
     app.add_handler(CallbackQueryHandler(menu_callback, pattern="^menu_"))
 
     # Scheduler: backup every 2 days
-    scheduler = AsyncIOScheduler(timezone="Asia/Kolkata")
+    scheduler = AsyncIOScheduler(timezone=IST_TZ)
     scheduler.add_job(
         perform_backup,
         trigger="interval",
         days=2,
         args=[app],
-        next_run_time=datetime.now() + timedelta(seconds=10),  # first run shortly after start (remove in prod)
+        next_run_time=now_ist() + timedelta(seconds=10),  # first run shortly after start (remove in prod)
+    )
+    scheduler.add_job(
+        auto_ping_services,
+        trigger="interval",
+        minutes=AUTO_PING_INTERVAL_MIN,
+        next_run_time=now_ist() + timedelta(seconds=30),
     )
     scheduler.add_job(
         auto_ping_services,
