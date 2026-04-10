@@ -1,7 +1,5 @@
 """
 SCFiles Backend Manager Bot — Pyrogram Edition
-Manages movies, series, collections via Telegram with TMDB metadata,
-auto-backup every 2 days, and a rich web dashboard.
 """
 
 import asyncio
@@ -23,41 +21,68 @@ from pyrogram.types import (
     Message,
 )
 
-logging.basicConfig(
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    level=logging.INFO,
-)
+# ─────────────────────── LOG FILE SETUP ───────────────────────
+LOG_FILE = "bot.log"
+
+class TeeHandler(logging.Handler):
+    def __init__(self, path: str):
+        super().__init__()
+        self.path = path
+        self.setFormatter(logging.Formatter(
+            "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
+        ))
+    def emit(self, record):
+        try:
+            with open(self.path, "a", encoding="utf-8") as f:
+                f.write(self.format(record) + "\n")
+        except Exception:
+            pass
+
+_stream_handler = logging.StreamHandler()
+_stream_handler.setFormatter(logging.Formatter(
+    "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
+))
+_file_handler = TeeHandler(LOG_FILE)
+logging.basicConfig(level=logging.INFO, handlers=[_stream_handler, _file_handler])
 logger = logging.getLogger("scfiles-bot")
 
 # ─────────────────────── CONFIG ───────────────────────
-API_ID           = int(os.environ["API_ID"])
-API_HASH         = os.environ["API_HASH"]
-BOT_TOKEN        = os.environ["TELEGRAM_TOKEN"]
-BACKEND_URL      = os.environ["BACKEND_URL"].rstrip("/")
-TMDB_API_KEY     = os.environ["TMDB_API_KEY"]
-ADMIN_IDS        = [int(x) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip()]
-BACKUP_CHAT_ID   = os.environ.get("BACKUP_CHAT_ID", "").strip()
-WEB_HOST         = os.environ.get("WEB_HOST", "0.0.0.0")
-WEB_PORT         = int(os.environ.get("WEB_PORT", "8080"))
-BOT_WEB_URL      = os.environ.get("BOT_WEB_URL", "").rstrip("/")
-AUTO_PING_MIN    = int(os.environ.get("AUTO_PING_INTERVAL_MIN", "5"))
-BACKUP_CFG_FILE  = os.environ.get("BACKUP_CONFIG_FILE", ".backup_config.json")
+def _require(key: str) -> str:
+    v = os.environ.get(key, "").strip()
+    if not v:
+        raise RuntimeError(f"Missing required env var: {key}")
+    return v
+
+try:
+    API_ID       = int(_require("API_ID"))
+    API_HASH     = _require("API_HASH")
+    BOT_TOKEN    = _require("TELEGRAM_TOKEN")
+    BACKEND_URL  = _require("BACKEND_URL").rstrip("/")
+    TMDB_API_KEY = _require("TMDB_API_KEY")
+except RuntimeError as e:
+    logger.critical(str(e))
+    raise
+
+ADMIN_IDS       = [int(x) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip()]
+BACKUP_CHAT_ID  = os.environ.get("BACKUP_CHAT_ID", "").strip()
+WEB_HOST        = os.environ.get("WEB_HOST", "0.0.0.0")
+WEB_PORT        = int(os.environ.get("WEB_PORT", "8080"))
+BOT_WEB_URL     = os.environ.get("BOT_WEB_URL", "").rstrip("/")
+AUTO_PING_MIN   = int(os.environ.get("AUTO_PING_INTERVAL_MIN", "5"))
+BACKUP_CFG_FILE = os.environ.get("BACKUP_CONFIG_FILE", ".backup_config.json")
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 TMDB_IMG  = "https://image.tmdb.org/t/p/w500"
 
 # ─────────────── Runtime state ───────────────
-BOT_STARTED_AT   = datetime.now()
-LAST_BACKUP_AT   = None
-LAST_PING_AT     = None
-BACKUP_TARGET    = BACKUP_CHAT_ID      # mutable at runtime
+BOT_STARTED_AT = datetime.now()
+LAST_BACKUP_AT = None
+LAST_PING_AT   = None
+BACKUP_TARGET  = BACKUP_CHAT_ID
 
-# ─────────────── Conversation state store ───────────────
-# key: user_id → {"state": STATE_NAME, "data": {...}}
+# ─────────────── Conversation states ───────────────
 _user_state: dict[int, dict] = {}
 
-# ─────────────── State names ───────────────
-S_IDLE = None
 S_ADD_MOVIE_TMDB    = "add_movie_tmdb"
 S_ADD_MOVIE_EXTRA   = "add_movie_extra"
 S_ADD_MOVIE_DL480   = "add_movie_dl480"
@@ -77,22 +102,17 @@ S_DEL_MOVIE         = "del_movie"
 S_DEL_SERIES        = "del_series"
 S_DEL_COL           = "del_col"
 S_EDIT_MOVIE_ID     = "edit_movie_id"
-S_EDIT_MOVIE_FIELD  = "edit_movie_field"
 S_EDIT_MOVIE_VALUE  = "edit_movie_value"
-S_TMDB_TYPE         = "tmdb_type"
 S_TMDB_QUERY        = "tmdb_query"
 
 def get_state(uid: int) -> str | None:
     return _user_state.get(uid, {}).get("state")
 
-def set_state(uid: int, state: str | None, **data):
-    if state is None:
-        _user_state.pop(uid, None)
-    else:
-        _user_state[uid] = {"state": state, "data": data}
-
 def get_data(uid: int) -> dict:
     return _user_state.get(uid, {}).get("data", {})
+
+def set_state(uid: int, state: str, **data):
+    _user_state[uid] = {"state": state, "data": data}
 
 def update_data(uid: int, **kwargs):
     if uid in _user_state:
@@ -101,7 +121,6 @@ def update_data(uid: int, **kwargs):
 def clear_state(uid: int):
     _user_state.pop(uid, None)
 
-# ─────────────── Auth ───────────────
 def is_admin(uid: int) -> bool:
     return not ADMIN_IDS or uid in ADMIN_IDS
 
@@ -110,9 +129,9 @@ def load_backup_target() -> str:
     if os.path.exists(BACKUP_CFG_FILE):
         try:
             with open(BACKUP_CFG_FILE) as f:
-                val = json.load(f).get("backup_chat_id", "")
-                if val:
-                    return str(val)
+                v = json.load(f).get("backup_chat_id", "")
+                if v:
+                    return str(v)
         except Exception:
             pass
     return BACKUP_CHAT_ID
@@ -121,63 +140,78 @@ def save_backup_target(chat_id: str):
     with open(BACKUP_CFG_FILE, "w") as f:
         json.dump({"backup_chat_id": str(chat_id)}, f)
 
-# ─────────────── HTTP helpers ───────────────
+# ─────────────── Shared aiohttp session ───────────────
+_SESSION: aiohttp.ClientSession | None = None
+
+async def get_session() -> aiohttp.ClientSession:
+    global _SESSION
+    if _SESSION is None or _SESSION.closed:
+        _SESSION = aiohttp.ClientSession()
+    return _SESSION
+
 async def api_get(path: str):
     try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(f"{BACKEND_URL}{path}", timeout=aiohttp.ClientTimeout(total=15)) as r:
-                return await r.json()
+        s = await get_session()
+        async with s.get(f"{BACKEND_URL}{path}", timeout=aiohttp.ClientTimeout(total=15)) as r:
+            return await r.json()
     except Exception as e:
         logger.error("API GET %s: %s", path, e)
         return None
 
 async def api_post(path: str, data: dict):
     try:
-        async with aiohttp.ClientSession() as s:
-            async with s.post(f"{BACKEND_URL}{path}", json=data, timeout=aiohttp.ClientTimeout(total=15)) as r:
-                return await r.json()
+        s = await get_session()
+        async with s.post(f"{BACKEND_URL}{path}", json=data,
+                          timeout=aiohttp.ClientTimeout(total=15)) as r:
+            return await r.json()
     except Exception as e:
         logger.error("API POST %s: %s", path, e)
         return None
 
 async def api_delete(path: str):
     try:
-        async with aiohttp.ClientSession() as s:
-            async with s.delete(f"{BACKEND_URL}{path}", timeout=aiohttp.ClientTimeout(total=15)) as r:
-                return await r.json()
+        s = await get_session()
+        async with s.delete(f"{BACKEND_URL}{path}",
+                            timeout=aiohttp.ClientTimeout(total=15)) as r:
+            return await r.json()
     except Exception as e:
         logger.error("API DELETE %s: %s", path, e)
         return None
 
-async def tmdb_movie(tid: int):
+# ─────────────── TMDB helpers ───────────────
+async def tmdb_movie(tid: int) -> dict | None:
     try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(f"{TMDB_BASE}/movie/{tid}?api_key={TMDB_API_KEY}&language=en-US",
-                             timeout=aiohttp.ClientTimeout(total=10)) as r:
-                return await r.json() if r.status == 200 else None
+        s = await get_session()
+        async with s.get(
+            f"{TMDB_BASE}/movie/{tid}?api_key={TMDB_API_KEY}&language=en-US",
+            timeout=aiohttp.ClientTimeout(total=10)
+        ) as r:
+            return await r.json() if r.status == 200 else None
     except Exception as e:
         logger.error("TMDB movie %s: %s", tid, e)
         return None
 
-async def tmdb_tv(tid: int):
+async def tmdb_tv(tid: int) -> dict | None:
     try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(f"{TMDB_BASE}/tv/{tid}?api_key={TMDB_API_KEY}&language=en-US",
-                             timeout=aiohttp.ClientTimeout(total=10)) as r:
-                return await r.json() if r.status == 200 else None
+        s = await get_session()
+        async with s.get(
+            f"{TMDB_BASE}/tv/{tid}?api_key={TMDB_API_KEY}&language=en-US",
+            timeout=aiohttp.ClientTimeout(total=10)
+        ) as r:
+            return await r.json() if r.status == 200 else None
     except Exception as e:
         logger.error("TMDB tv %s: %s", tid, e)
         return None
 
-async def tmdb_search(query: str, media_type="movie") -> list:
+async def tmdb_search(query: str, media_type: str = "movie") -> list:
     try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(
-                f"{TMDB_BASE}/search/{media_type}?api_key={TMDB_API_KEY}&query={query}&language=en-US",
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as r:
-                if r.status == 200:
-                    return (await r.json()).get("results", [])[:5]
+        s = await get_session()
+        async with s.get(
+            f"{TMDB_BASE}/search/{media_type}?api_key={TMDB_API_KEY}&query={query}&language=en-US",
+            timeout=aiohttp.ClientTimeout(total=10)
+        ) as r:
+            if r.status == 200:
+                return (await r.json()).get("results", [])[:5]
     except Exception as e:
         logger.error("TMDB search: %s", e)
     return []
@@ -188,7 +222,7 @@ def fmt_movie(m: dict) -> str:
     rating  = m.get("vote_average", 0)
     runtime = m.get("runtime", 0)
     genres  = ", ".join(g["name"] for g in m.get("genres", []))
-    ov      = (m.get("overview") or "No overview.")[:350]
+    ov      = (m.get("overview") or "No overview.")[:300]
     return (
         f"🎬 **{title}** ({year})\n"
         f"⭐ {rating:.1f}/10  •  ⏱ {runtime} min\n"
@@ -203,7 +237,7 @@ def fmt_tv(t: dict) -> str:
     seasons = t.get("number_of_seasons", "?")
     eps     = t.get("number_of_episodes", "?")
     genres  = ", ".join(g["name"] for g in t.get("genres", []))
-    ov      = (t.get("overview") or "No overview.")[:350]
+    ov      = (t.get("overview") or "No overview.")[:300]
     return (
         f"📺 **{name}** ({year})\n"
         f"⭐ {rating:.1f}/10  •  {seasons} seasons / {eps} eps\n"
@@ -211,25 +245,27 @@ def fmt_tv(t: dict) -> str:
         f"📝 {ov}"
     )
 
-def poster(info: dict) -> str | None:
+def poster_url(info: dict) -> str | None:
     p = info.get("poster_path")
     return f"{TMDB_IMG}{p}" if p else None
 
 # ─────────────── Backup helpers ───────────────
 async def _collect_payloads() -> dict[str, bytes]:
-    out = {}
-    for fname, path in [("movies.json", "/api/movies"),
-                        ("series.json", "/api/series"),
-                        ("collections.json", "/api/collections")]:
+    result = {}
+    for fname, path in [
+        ("movies.json",      "/api/movies"),
+        ("series.json",      "/api/series"),
+        ("collections.json", "/api/collections"),
+    ]:
         data = await api_get(path)
         if data is None:
             raise RuntimeError(f"Could not fetch {path}")
-        out[fname] = json.dumps(data, indent=2, ensure_ascii=False).encode()
-    return out
+        result[fname] = json.dumps(data, indent=2, ensure_ascii=False).encode()
+    return result
 
 async def create_zip() -> tuple[bytes, str]:
     payloads = await _collect_payloads()
-    ts = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    ts  = datetime.now().strftime("%Y-%m-%d_%H-%M")
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for name, data in payloads.items():
@@ -245,11 +281,10 @@ async def perform_backup(bot: Client, target: str | int | None = None) -> tuple[
     ts = datetime.now().strftime("%Y-%m-%d_%H-%M")
     try:
         await bot.send_message(int(dest), f"💾 **Auto-Backup** — {ts}")
-        payloads = await _collect_payloads()
-        for name, data in payloads.items():
+        for fname, data in (await _collect_payloads()).items():
             buf = io.BytesIO(data)
-            buf.name = f"{ts}_{name}"
-            await bot.send_document(int(dest), buf, caption=f"`{ts}_{name}`")
+            buf.name = f"{ts}_{fname}"
+            await bot.send_document(int(dest), buf, caption=f"`{ts}_{fname}`")
         LAST_BACKUP_AT = datetime.now()
         logger.info("Backup done → %s", dest)
         return True, dest
@@ -257,97 +292,97 @@ async def perform_backup(bot: Client, target: str | int | None = None) -> tuple[
         logger.error("Backup failed → %s: %s", dest, e)
         return False, str(e)
 
-# ─────────────── Pyrogram app ───────────────
-pyro = Client("scfiles_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+# ─────────────── Pyrogram client ───────────────
+# in_memory=True: no session file — avoids file-lock / permission issues on deployment
+pyro = Client(
+    "scfiles_bot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN,
+    in_memory=True,
+)
 
 def main_menu_kb() -> InlineKeyboardMarkup:
     rows = [
-        [InlineKeyboardButton("🎬 Movies", callback_data="menu_movies"),
-         InlineKeyboardButton("📺 Series", callback_data="menu_series")],
-        [InlineKeyboardButton("🗂 Collections", callback_data="menu_cols"),
-         InlineKeyboardButton("🔍 TMDB Search", callback_data="menu_tmdb")],
-        [InlineKeyboardButton("📊 Stats", callback_data="menu_stats"),
+        [InlineKeyboardButton("🎬 Movies",       callback_data="menu_movies"),
+         InlineKeyboardButton("📺 Series",        callback_data="menu_series")],
+        [InlineKeyboardButton("🗂 Collections",   callback_data="menu_cols"),
+         InlineKeyboardButton("🔍 TMDB Search",   callback_data="menu_tmdb")],
+        [InlineKeyboardButton("📊 Stats",         callback_data="menu_stats"),
          InlineKeyboardButton("🌐 Server Status", callback_data="menu_status")],
-        [InlineKeyboardButton("💾 Backup Now", callback_data="menu_backup"),
-         InlineKeyboardButton("📦 Backup ZIP", callback_data="menu_backup_zip")],
+        [InlineKeyboardButton("💾 Backup Now",    callback_data="menu_backup"),
+         InlineKeyboardButton("📦 Backup ZIP",    callback_data="menu_backup_zip")],
     ]
     if BOT_WEB_URL:
         rows.append([InlineKeyboardButton("🩺 Web Dashboard", url=BOT_WEB_URL)])
     return InlineKeyboardMarkup(rows)
 
-# ─────────── /start ───────────
+# ═══════════════════════════════════════
+#  COMMAND HANDLERS
+# ═══════════════════════════════════════
+
 @pyro.on_message(filters.command("start") & filters.private)
 async def cmd_start(_, msg: Message):
-    await msg.reply(
-        "🎛 **SCFiles Backend Manager**\n\nChoose an action:",
-        reply_markup=main_menu_kb(),
-    )
+    await msg.reply("🎛 **SCFiles Backend Manager**\n\nChoose an action:",
+                    reply_markup=main_menu_kb())
 
-# ─────────── /help ───────────
 @pyro.on_message(filters.command("help") & filters.private)
 async def cmd_help(_, msg: Message):
-    cmds = [
-        "/start — Main menu",
-        "/status — Server health",
-        "/stats — DB statistics",
-        "/movies — List recent movies",
-        "/series — List recent series",
-        "/collections — List collections",
-        "/addmovie — Add movie (admin)",
-        "/addseries — Add series (admin)",
-        "/addcollection — Add collection (admin)",
-        "/editmovie — Edit movie field (admin)",
-        "/delmovie — Delete movie (admin)",
-        "/delseries — Delete series (admin)",
-        "/delcollection — Delete collection (admin)",
-        "/tmdb — TMDB metadata search (admin)",
-        "/backup — Send backup to channel (admin)",
-        "/backupzip — Download all as ZIP (admin)",
-        "/setbackup — Set backup channel (admin)",
-        "/cancel — Cancel current operation",
-    ]
-    await msg.reply("📖 **Commands**\n\n" + "\n".join(cmds))
+    await msg.reply(
+        "📖 **Commands**\n\n"
+        "/start — Main menu\n"
+        "/status — Server health\n"
+        "/stats — DB statistics\n"
+        "/movies — List recent movies\n"
+        "/series — List recent series\n"
+        "/collections — List collections\n"
+        "/addmovie — Add a movie _(admin)_\n"
+        "/addseries — Add a series _(admin)_\n"
+        "/addcollection — Add a collection _(admin)_\n"
+        "/editmovie — Edit a movie field _(admin)_\n"
+        "/delmovie — Delete a movie _(admin)_\n"
+        "/delseries — Delete a series _(admin)_\n"
+        "/delcollection — Delete a collection _(admin)_\n"
+        "/tmdb — Search TMDB _(admin)_\n"
+        "/backup — Send backup files _(admin)_\n"
+        "/backupzip — Download backup as ZIP _(admin)_\n"
+        "/setbackup — Set backup channel _(admin)_\n"
+        "/logs — View deployment logs _(admin)_\n"
+        "/cancel — Cancel current operation"
+    )
 
-# ─────────── /cancel ───────────
 @pyro.on_message(filters.command("cancel") & filters.private)
 async def cmd_cancel(_, msg: Message):
     clear_state(msg.from_user.id)
     await msg.reply("❌ Operation cancelled.")
 
-# ─────────── /status ───────────
 @pyro.on_message(filters.command("status") & filters.private)
 async def cmd_status(_, msg: Message):
-    await _send_status(msg)
-
-async def _send_status(msg: Message, prefix=""):
     now    = datetime.now()
     uptime = str(now - BOT_STARTED_AT).split(".")[0]
     try:
+        s = await get_session()
         t0 = datetime.now()
-        async with aiohttp.ClientSession() as s:
-            async with s.get(BACKEND_URL, timeout=aiohttp.ClientTimeout(total=10)) as r:
-                ms   = (datetime.now() - t0).total_seconds() * 1000
-                code = r.status
-                body = (await r.text())[:80]
-                icon = "🟢" if code == 200 else "🟡"
-        text = (
-            f"{prefix}**Health Report**\n\n"
-            f"🤖 Bot: 🟢 Online | ⏱ `{uptime}`\n"
-            f"🖥 Backend: {icon} `{code}` | ⚡ `{ms:.0f}ms`\n"
+        async with s.get(BACKEND_URL, timeout=aiohttp.ClientTimeout(total=10)) as r:
+            ms   = (datetime.now() - t0).total_seconds() * 1000
+            code = r.status
+            body = (await r.text())[:80]
+        ic  = "🟢" if code == 200 else "🟡"
+        txt = (
+            f"**Health Report**\n\n"
+            f"🤖 Bot: 🟢 Online  |  ⏱ `{uptime}`\n\n"
+            f"🖥 Backend: {ic} `{code}`  |  ⚡ `{ms:.0f}ms`\n"
             f"🔗 `{BACKEND_URL}`\n"
-            f"📨 `{body}`\n"
-            f"🕐 `{now.strftime('%Y-%m-%d %H:%M:%S')}`"
+            f"📨 `{body}`"
         )
     except Exception as e:
-        text = (
-            f"{prefix}**Health Report**\n\n"
-            f"🤖 Bot: 🟢 Online | ⏱ `{uptime}`\n"
-            f"🖥 Backend: 🔴 Offline\n"
-            f"❗ `{e}`"
+        txt = (
+            f"**Health Report**\n\n"
+            f"🤖 Bot: 🟢 Online  |  ⏱ `{uptime}`\n\n"
+            f"🖥 Backend: 🔴 Offline\n❗ `{e}`"
         )
-    await msg.reply(text)
+    await msg.reply(txt)
 
-# ─────────── /stats ───────────
 @pyro.on_message(filters.command("stats") & filters.private)
 async def cmd_stats(_, msg: Message):
     movies = await api_get("/api/movies") or []
@@ -361,34 +396,55 @@ async def cmd_stats(_, msg: Message):
         f"🕐 `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`"
     )
 
-# ─────────── /movies ───────────
 @pyro.on_message(filters.command("movies") & filters.private)
 async def cmd_movies(_, msg: Message):
     items = await api_get("/api/movies?limit=15") or []
     if not items:
         return await msg.reply("No movies found.")
-    lines = [f"• `{m['id']}` | TMDB `{m.get('tmdb_id','?')}` | {m.get('extras','')}" for m in items[:15]]
+    lines = [
+        f"• `{m.get('id','?')}` | TMDB `{m.get('tmdb_id','?')}` | {m.get('extras','') or '—'}"
+        for m in items[:15]
+    ]
     await msg.reply("🎬 **Recent Movies**\n\n" + "\n".join(lines))
 
-# ─────────── /series ───────────
 @pyro.on_message(filters.command("series") & filters.private)
-async def cmd_series(_, msg: Message):
+async def cmd_series_list(_, msg: Message):
     items = await api_get("/api/series?limit=15") or []
     if not items:
         return await msg.reply("No series found.")
-    lines = [f"• `{s['id']}` | TMDB `{s.get('tmdb_id','?')}` | {len(s.get('seasons',[]))} season(s)" for s in items[:15]]
+    lines = [
+        f"• `{s.get('id','?')}` | TMDB `{s.get('tmdb_id','?')}` | {len(s.get('seasons',[]))} season(s)"
+        for s in items[:15]
+    ]
     await msg.reply("📺 **Recent Series**\n\n" + "\n".join(lines))
 
-# ─────────── /collections ───────────
 @pyro.on_message(filters.command("collections") & filters.private)
 async def cmd_collections(_, msg: Message):
     cols = await api_get("/api/collections") or {}
     if not cols:
         return await msg.reply("No collections found.")
-    lines = [f"• `{k}` — {v.get('name','?')} ({len(v.get('movies',[]))} movies)" for k, v in list(cols.items())[:15]]
+    lines = [
+        f"• `{k}` — {v.get('name','?')} ({len(v.get('movies',[]))} movies)"
+        for k, v in list(cols.items())[:15]
+    ]
     await msg.reply("🗂 **Collections**\n\n" + "\n".join(lines))
 
-# ─────────── /backup ───────────
+@pyro.on_message(filters.command("logs") & filters.private)
+async def cmd_logs(_, msg: Message):
+    if not is_admin(msg.from_user.id):
+        return await msg.reply("⛔ Access denied.")
+    if not os.path.exists(LOG_FILE):
+        return await msg.reply("📭 No log file yet.")
+    with open(LOG_FILE, "rb") as f:
+        f.seek(0, 2)
+        size = f.tell()
+        f.seek(max(0, size - 8192))
+        tail = f.read()
+    buf = io.BytesIO(tail)
+    ts  = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    buf.name = f"scfiles_logs_{ts}.txt"
+    await msg.reply_document(buf, caption=f"📋 Last {len(tail)//1024 or 1}KB of logs · {ts}")
+
 @pyro.on_message(filters.command("backup") & filters.private)
 async def cmd_backup(_, msg: Message):
     if not is_admin(msg.from_user.id):
@@ -396,9 +452,10 @@ async def cmd_backup(_, msg: Message):
     m = await msg.reply("💾 Starting backup…")
     dest = BACKUP_TARGET or str(msg.chat.id)
     ok, info = await perform_backup(pyro, dest)
-    await m.edit(f"✅ Backup sent to `{info}`." if ok else f"❌ Backup failed: `{info}`")
+    await m.edit_text(
+        f"✅ Backup sent to `{info}`." if ok else f"❌ Backup failed:\n`{info}`"
+    )
 
-# ─────────── /backupzip ───────────
 @pyro.on_message(filters.command("backupzip") & filters.private)
 async def cmd_backupzip(_, msg: Message):
     if not is_admin(msg.from_user.id):
@@ -411,9 +468,8 @@ async def cmd_backupzip(_, msg: Message):
         await msg.reply_document(buf, caption=f"✅ Backup ZIP `{ts}`")
         await m.delete()
     except Exception as e:
-        await m.edit(f"❌ ZIP failed: `{e}`")
+        await m.edit_text(f"❌ ZIP failed:\n`{e}`")
 
-# ─────────── /setbackup ───────────
 @pyro.on_message(filters.command("setbackup") & filters.private)
 async def cmd_setbackup(_, msg: Message):
     global BACKUP_TARGET
@@ -421,15 +477,16 @@ async def cmd_setbackup(_, msg: Message):
         return await msg.reply("⛔ Access denied.")
     parts = msg.text.split(maxsplit=1)
     if len(parts) < 2:
-        return await msg.reply(f"📦 Current backup chat: `{BACKUP_TARGET or 'Not set'}`\n\nUsage: `/setbackup <chat_id>`")
-    chat_id = parts[1].strip()
-    BACKUP_TARGET = chat_id
-    save_backup_target(chat_id)
-    await msg.reply(f"✅ Backup chat set to `{chat_id}`.")
+        return await msg.reply(
+            f"📦 Current backup chat: `{BACKUP_TARGET or 'Not set'}`\n\n"
+            f"Usage: `/setbackup <chat_id>`"
+        )
+    BACKUP_TARGET = parts[1].strip()
+    save_backup_target(BACKUP_TARGET)
+    await msg.reply(f"✅ Backup chat set to `{BACKUP_TARGET}`.")
 
-# ═══════════════════════════════════════════════════
-#  ADD MOVIE  (conversation)
-# ═══════════════════════════════════════════════════
+# ── Conversation starters ────────────────────────────────────
+
 @pyro.on_message(filters.command("addmovie") & filters.private)
 async def cmd_addmovie(_, msg: Message):
     if not is_admin(msg.from_user.id):
@@ -437,9 +494,6 @@ async def cmd_addmovie(_, msg: Message):
     set_state(msg.from_user.id, S_ADD_MOVIE_TMDB)
     await msg.reply("🎬 **Add Movie**\n\nEnter the **TMDB Movie ID**:")
 
-# ═══════════════════════════════════════════════════
-#  ADD SERIES  (conversation)
-# ═══════════════════════════════════════════════════
 @pyro.on_message(filters.command("addseries") & filters.private)
 async def cmd_addseries(_, msg: Message):
     if not is_admin(msg.from_user.id):
@@ -447,9 +501,6 @@ async def cmd_addseries(_, msg: Message):
     set_state(msg.from_user.id, S_ADD_SERIES_TMDB)
     await msg.reply("📺 **Add Series**\n\nEnter the **TMDB TV Show ID**:")
 
-# ═══════════════════════════════════════════════════
-#  ADD COLLECTION  (conversation)
-# ═══════════════════════════════════════════════════
 @pyro.on_message(filters.command("addcollection") & filters.private)
 async def cmd_addcollection(_, msg: Message):
     if not is_admin(msg.from_user.id):
@@ -457,13 +508,10 @@ async def cmd_addcollection(_, msg: Message):
     set_state(msg.from_user.id, S_ADD_COL_ID)
     await msg.reply(
         "🗂 **Add Collection**\n\n"
-        "Steps: ID → Name → Banner → BG Music → Movies (JSON)\n\n"
-        "Enter collection **ID** (slug, e.g. `vijay` or `marvel-mcu`):"
+        "Steps: ID → Name → Banner → BG Music → Movies JSON\n\n"
+        "Enter collection **ID** (slug, e.g. `vijay`):"
     )
 
-# ═══════════════════════════════════════════════════
-#  DELETE commands
-# ═══════════════════════════════════════════════════
 @pyro.on_message(filters.command("delmovie") & filters.private)
 async def cmd_delmovie(_, msg: Message):
     if not is_admin(msg.from_user.id):
@@ -485,9 +533,6 @@ async def cmd_delcollection(_, msg: Message):
     set_state(msg.from_user.id, S_DEL_COL)
     await msg.reply("🗑 Enter the **collection ID** to delete:")
 
-# ═══════════════════════════════════════════════════
-#  EDIT MOVIE  (conversation)
-# ═══════════════════════════════════════════════════
 @pyro.on_message(filters.command("editmovie") & filters.private)
 async def cmd_editmovie(_, msg: Message):
     if not is_admin(msg.from_user.id):
@@ -495,128 +540,134 @@ async def cmd_editmovie(_, msg: Message):
     set_state(msg.from_user.id, S_EDIT_MOVIE_ID)
     await msg.reply("✏️ Enter the **movie ID** to edit:")
 
-# ═══════════════════════════════════════════════════
-#  TMDB SEARCH  (conversation)
-# ═══════════════════════════════════════════════════
 @pyro.on_message(filters.command("tmdb") & filters.private)
 async def cmd_tmdb(_, msg: Message):
     if not is_admin(msg.from_user.id):
         return await msg.reply("⛔ Access denied.")
-    set_state(msg.from_user.id, S_TMDB_TYPE)
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎬 Movie", callback_data="tmdb_movie"),
-         InlineKeyboardButton("📺 TV Show", callback_data="tmdb_tv")]
-    ])
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🎬 Movie",   callback_data="tmdb_movie"),
+        InlineKeyboardButton("📺 TV Show", callback_data="tmdb_tv"),
+    ]])
+    set_state(msg.from_user.id, S_TMDB_QUERY, tmdb_type="movie")
     await msg.reply("🔍 **TMDB Search** — What type?", reply_markup=kb)
 
-# ═══════════════════════════════════════════════════
-#  UNIVERSAL TEXT HANDLER  (state machine)
-#  NOTE: We catch ALL private text here and skip if no state is set.
-#        Command handlers registered above take priority in Pyrogram,
-#        so commands will never reach this handler.
-# ═══════════════════════════════════════════════════
+# ═══════════════════════════════════════
+#  UNIVERSAL TEXT HANDLER (state machine)
+# ═══════════════════════════════════════
 @pyro.on_message(filters.text & filters.private)
 async def on_text(_, msg: Message):
-    uid   = msg.from_user.id
-    state = get_state(uid)
-    text  = msg.text.strip()
+    # Guard: from_user can be None for channel posts
+    if not msg.from_user:
+        return
 
-    # Ignore commands (they are handled by dedicated handlers above)
+    uid  = msg.from_user.id
+    text = (msg.text or "").strip()
+
+    # Commands are already handled above; Pyrogram gives them priority
     if text.startswith("/"):
         return
 
+    state = get_state(uid)
     if state is None:
-        return  # ignore unsolicited text
+        return
 
-    # ─── ADD MOVIE ───
+    logger.info("State [%s] uid=%s text=%r", state, uid, text[:60])
+
+    try:
+        await _dispatch(msg, uid, state, text)
+    except Exception as e:
+        logger.exception("State handler [%s] crashed: %s", state, e)
+        await msg.reply(f"⚠️ Error: `{e}`\n\nUse /cancel to reset.")
+
+
+async def _dispatch(msg: Message, uid: int, state: str, text: str):
+    d = get_data(uid)   # current conversation data (mutable dict reference)
+
+    # ── ADD MOVIE ──────────────────────────────────────────────────────
     if state == S_ADD_MOVIE_TMDB:
         if not text.isdigit():
             return await msg.reply("❌ Enter a valid numeric TMDB ID.")
-        tid = int(text)
+        tid  = int(text)
         info = await tmdb_movie(tid)
-        data = {"tmdb_id": tid, "downloads": {}, "subtitles": {}}
+        mdata = {"tmdb_id": tid, "downloads": {}, "subtitles": {}}
         if info:
-            data["id"] = info.get("title", "").lower().replace(" ", "-").replace("'", "")
-            p = poster(info)
-            caption = fmt_movie(info) + f"\n\nSuggested ID: `{data['id']}`\n\nEnter **extras** (e.g. `PreDVD - Tamil Audio`) or `-` to skip:"
+            mdata["id"] = (info.get("title") or "").lower().replace(" ", "-").replace("'", "")
+            p       = poster_url(info)
+            caption = (
+                fmt_movie(info)
+                + f"\n\nSuggested ID: `{mdata['id']}`"
+                + "\n\nEnter **extras** (e.g. `PreDVD - Tamil Audio`) or `-` to skip:"
+            )
             if p:
                 await msg.reply_photo(p, caption=caption)
             else:
                 await msg.reply(caption)
         else:
-            await msg.reply("⚠️ TMDB not found. Enter **extras** or `-`:")
-        update_data(uid, **data)
-        set_state(uid, S_ADD_MOVIE_EXTRA, **get_data(uid))
-        return
+            await msg.reply("⚠️ TMDB not found.\nEnter **extras** or `-` to skip:")
+        set_state(uid, S_ADD_MOVIE_EXTRA, **mdata)
 
-    if state == S_ADD_MOVIE_EXTRA:
-        update_data(uid, extras="" if text == "-" else text)
-        set_state(uid, S_ADD_MOVIE_DL480, **get_data(uid))
-        return await msg.reply("📥 Enter **480p download link** (or `-` to skip):")
+    elif state == S_ADD_MOVIE_EXTRA:
+        d["extras"] = "" if text == "-" else text
+        set_state(uid, S_ADD_MOVIE_DL480, **d)
+        await msg.reply("📥 Enter **480p download link** (or `-` to skip):")
 
-    if state == S_ADD_MOVIE_DL480:
+    elif state == S_ADD_MOVIE_DL480:
         if text != "-":
-            d = get_data(uid)
             d["downloads"]["480"] = text
-            update_data(uid, downloads=d["downloads"])
-        set_state(uid, S_ADD_MOVIE_DL720, **get_data(uid))
-        return await msg.reply("📥 Enter **720p download link** (or `-` to skip):")
+        set_state(uid, S_ADD_MOVIE_DL720, **d)
+        await msg.reply("📥 Enter **720p download link** (or `-` to skip):")
 
-    if state == S_ADD_MOVIE_DL720:
+    elif state == S_ADD_MOVIE_DL720:
         if text != "-":
-            d = get_data(uid)
             d["downloads"]["720"] = text
-            update_data(uid, downloads=d["downloads"])
-        set_state(uid, S_ADD_MOVIE_DL1080, **get_data(uid))
-        return await msg.reply("📥 Enter **1080p download link** (or `-` to skip):")
+        set_state(uid, S_ADD_MOVIE_DL1080, **d)
+        await msg.reply("📥 Enter **1080p download link** (or `-` to skip):")
 
-    if state == S_ADD_MOVIE_DL1080:
+    elif state == S_ADD_MOVIE_DL1080:
         if text != "-":
-            d = get_data(uid)
             d["downloads"]["1080"] = text
-            update_data(uid, downloads=d["downloads"])
-        set_state(uid, S_ADD_MOVIE_POS, **get_data(uid))
+        set_state(uid, S_ADD_MOVIE_POS, **d)
         kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("⬆️ Top", callback_data="pos_top"),
+            InlineKeyboardButton("⬆️ Top",    callback_data="pos_top"),
             InlineKeyboardButton("⬇️ Bottom", callback_data="pos_bottom"),
         ]])
-        return await msg.reply("📌 Where should this movie be added?", reply_markup=kb)
+        await msg.reply("📌 Where should this movie appear?", reply_markup=kb)
 
-    if state == S_ADD_MOVIE_CONFIRM:
-        if text.lower() not in ("yes", "no"):
-            return await msg.reply("Please type **yes** to confirm or **no** to cancel.")
-        if text.lower() != "yes":
+    elif state == S_ADD_MOVIE_POS:
+        await msg.reply("👆 Please tap **Top** or **Bottom** above.")
+
+    elif state == S_ADD_MOVIE_CONFIRM:
+        if text.lower() == "no":
             clear_state(uid)
             return await msg.reply("❌ Cancelled.")
-        d = get_data(uid)
+        if text.lower() != "yes":
+            return await msg.reply("Type **yes** to confirm or **no** to cancel.")
         d.setdefault("subtitles", {})
-        # Backend API accepts 'position' as top-level field for insertion order
-        # The stored JSON uses 'pos' field — send both so backend handles it
-        pos = d.get("pos", "bottom")
-        payload = {k: v for k, v in d.items()}   # copy
-        payload["position"] = pos                 # API param for top/bottom insertion
-        result = await api_post("/api/movies", payload)
+        pos     = d.get("pos", "bottom")
+        payload = {**d, "position": pos}   # 'position' = API insertion param
+        result  = await api_post("/api/movies", payload)
         clear_state(uid)
         if result and result.get("success"):
-            return await msg.reply(f"✅ Movie added to **{pos}**! Total: **{result['count']}**")
-        return await msg.reply(f"❌ Failed: `{result}`")
+            await msg.reply(f"✅ Movie added to **{pos}**! Total: **{result['count']}**")
+        else:
+            await msg.reply(f"❌ Failed: `{result}`")
 
-    # ─── ADD SERIES ───
-    if state == S_ADD_SERIES_TMDB:
+    # ── ADD SERIES ────────────────────────────────────────────────────
+    elif state == S_ADD_SERIES_TMDB:
         if not text.isdigit():
             return await msg.reply("❌ Enter a valid numeric TMDB ID.")
-        tid = int(text)
+        tid  = int(text)
         info = await tmdb_tv(tid)
-        data = {"tmdb_id": str(tid), "seasons": []}   # tmdb_id is STRING in series.json
+        sdata = {"tmdb_id": str(tid), "seasons": []}   # tmdb_id is STRING in series.json
         if info:
-            data["id"] = info.get("name", "").lower().replace(" ", "-").replace("'", "")
-            p = poster(info)
+            sdata["id"] = (info.get("name") or "").lower().replace(" ", "-").replace("'", "")
+            p       = poster_url(info)
             caption = (
                 fmt_tv(info)
-                + f"\n\nSuggested ID: `{data['id']}`\n\n"
+                + f"\n\nSuggested ID: `{sdata['id']}`\n\n"
                 + "📋 Paste **episode data** as JSON:\n"
-                + "```json\n[\n  {\n    \"season_number\": 1,\n    \"episodes\": [\n"
-                + "      {\"ep_number\":1,\"links\":{\"360p\":\"URL\",\"720p\":\"URL\"},\"subtitle\":\"\"}\n"
+                + "```\n[\n  {\n    \"season_number\": 1,\n    \"episodes\": [\n"
+                + "      {\"ep_number\": 1, \"links\": {\"360p\": \"URL\", \"720p\": \"URL\"}, \"subtitle\": \"\"}\n"
                 + "    ]\n  }\n]\n```"
             )
             if p:
@@ -625,79 +676,75 @@ async def on_text(_, msg: Message):
                 await msg.reply(caption)
         else:
             await msg.reply("⚠️ TMDB not found. Paste episode JSON:")
-        update_data(uid, **data)
-        set_state(uid, S_ADD_SERIES_JSON, **get_data(uid))
-        return
+        set_state(uid, S_ADD_SERIES_JSON, **sdata)
 
-    if state == S_ADD_SERIES_JSON:
+    elif state == S_ADD_SERIES_JSON:
         try:
             seasons = json.loads(text)
             if not isinstance(seasons, list):
-                raise ValueError("Must be a JSON array")
-            # Validate structure
+                raise ValueError("Must be a JSON array [ ... ]")
             for s in seasons:
                 if "season_number" not in s or "episodes" not in s:
                     raise ValueError("Each season needs 'season_number' and 'episodes'")
                 for ep in s["episodes"]:
                     if "ep_number" not in ep or "links" not in ep:
                         raise ValueError("Each episode needs 'ep_number' and 'links'")
-                    if "subtitle" not in ep:
-                        ep["subtitle"] = ""   # auto-add if missing
-            update_data(uid, seasons=seasons)
-        except Exception as e:
+                    ep.setdefault("subtitle", "")
+        except (json.JSONDecodeError, ValueError) as e:
             return await msg.reply(
-                f"❌ Invalid JSON: {e}\n\n"
-                f"Expected format:\n"
-                f"```json\n[{{\"season_number\":1,\"episodes\":["
-                f"{{\"ep_number\":1,\"links\":{{\"360p\":\"URL\",\"720p\":\"URL\"}},\"subtitle\":\"\"}}]}}]\n```"
+                f"❌ Invalid JSON: `{e}`\n\n"
+                "Required format:\n"
+                "```\n[{\"season_number\":1,\"episodes\":"
+                "[{\"ep_number\":1,\"links\":{\"360p\":\"URL\",\"720p\":\"URL\"},\"subtitle\":\"\"}]}]\n```"
             )
-        d = get_data(uid)
-        total_eps = sum(len(s.get("episodes",[])) for s in seasons)
+        d["seasons"] = seasons
+        total_eps    = sum(len(s.get("episodes", [])) for s in seasons)
         set_state(uid, S_ADD_SERIES_CONFIRM, **d)
-        return await msg.reply(
+        await msg.reply(
             f"✅ **Confirm Series**\n\n"
             f"ID: `{d.get('id','?')}`\n"
             f"TMDB ID: `{d.get('tmdb_id','?')}`\n"
-            f"Seasons: `{len(d['seasons'])}`\n"
-            f"Total episodes: `{total_eps}`\n"
+            f"Seasons: `{len(seasons)}`  |  Episodes: `{total_eps}`\n"
             f"Position: `top` _(always)_\n\n"
             f"Type **yes** to confirm or **no** to cancel:"
         )
 
-    if state == S_ADD_SERIES_CONFIRM:
-        if text.lower() != "yes":
+    elif state == S_ADD_SERIES_CONFIRM:
+        if text.lower() == "no":
             clear_state(uid)
             return await msg.reply("❌ Cancelled.")
-        d = get_data(uid)
-        d["position"] = "top"          # series always go to top
+        if text.lower() != "yes":
+            return await msg.reply("Type **yes** to confirm or **no** to cancel.")
+        d["position"] = "top"
         result = await api_post("/api/series", d)
         clear_state(uid)
         if result and result.get("success"):
-            return await msg.reply(f"✅ Series added to **top**! Total: **{result['count']}**")
-        return await msg.reply(f"❌ Failed: `{result}`")
+            await msg.reply(f"✅ Series added to **top**! Total: **{result['count']}**")
+        else:
+            await msg.reply(f"❌ Failed: `{result}`")
 
-    # ─── ADD COLLECTION ───
-    if state == S_ADD_COL_ID:
+    # ── ADD COLLECTION ────────────────────────────────────────────────
+    elif state == S_ADD_COL_ID:
         set_state(uid, S_ADD_COL_NAME, col_id=text)
-        return await msg.reply("Enter collection **Name**:")
+        await msg.reply("Enter collection **Name**:")
 
-    if state == S_ADD_COL_NAME:
-        update_data(uid, col_name=text)
-        set_state(uid, S_ADD_COL_BANNER, **get_data(uid))
-        return await msg.reply("Enter **banner URL** (or `-` to skip):")
+    elif state == S_ADD_COL_NAME:
+        d["col_name"] = text
+        set_state(uid, S_ADD_COL_BANNER, **d)
+        await msg.reply("Enter **banner URL** (or `-` to skip):")
 
-    if state == S_ADD_COL_BANNER:
-        update_data(uid, col_banner="" if text == "-" else text)
-        set_state(uid, S_ADD_COL_BGMUSIC, **get_data(uid))
-        return await msg.reply("Enter **bg-music URL** (or `-` to skip):")
+    elif state == S_ADD_COL_BANNER:
+        d["col_banner"] = "" if text == "-" else text
+        set_state(uid, S_ADD_COL_BGMUSIC, **d)
+        await msg.reply("Enter **bg-music URL** (or `-` to skip):")
 
-    if state == S_ADD_COL_BGMUSIC:
-        update_data(uid, col_bgmusic="" if text == "-" else text)
-        set_state(uid, S_ADD_COL_MOVIES, **get_data(uid))
-        return await msg.reply(
+    elif state == S_ADD_COL_BGMUSIC:
+        d["col_bgmusic"] = "" if text == "-" else text
+        set_state(uid, S_ADD_COL_MOVIES, **d)
+        await msg.reply(
             "📋 Paste **movies list** as JSON array.\n\n"
-            "Each movie needs: `id`, `tmdb_id`, `quality`, `download`\n\n"
-            "```json\n[\n"
+            "Each item needs: `id`, `tmdb_id` (int), `quality`, `download`\n\n"
+            "```\n[\n"
             "  {\n"
             "    \"id\": \"movie-slug\",\n"
             "    \"tmdb_id\": 12345,\n"
@@ -707,20 +754,17 @@ async def on_text(_, msg: Message):
             "]\n```"
         )
 
-    if state == S_ADD_COL_MOVIES:
+    elif state == S_ADD_COL_MOVIES:
         try:
             movies_list = json.loads(text)
             if not isinstance(movies_list, list):
                 raise ValueError("Must be a JSON array")
             for m in movies_list:
-                if not all(k in m for k in ("id", "tmdb_id", "quality", "download")):
-                    raise ValueError("Each movie needs: id, tmdb_id, quality, download")
-        except Exception as e:
-            return await msg.reply(
-                f"❌ Invalid JSON: {e}\n\n"
-                f"Each item must have: `id`, `tmdb_id`, `quality`, `download`"
-            )
-        d = get_data(uid)
+                missing = [k for k in ("id", "tmdb_id", "quality", "download") if k not in m]
+                if missing:
+                    raise ValueError(f"Movie object missing keys: {missing}")
+        except (json.JSONDecodeError, ValueError) as e:
+            return await msg.reply(f"❌ Invalid JSON: `{e}`\n\nTry again:")
         payload = {
             "id":       d["col_id"],
             "name":     d["col_name"],
@@ -731,49 +775,55 @@ async def on_text(_, msg: Message):
         result = await api_post("/api/collections", payload)
         clear_state(uid)
         if result and result.get("success"):
-            return await msg.reply(
-                f"✅ Collection **{d['col_name']}** created at **bottom**!\n"
-                f"Movies: **{len(movies_list)}** | Total collections: **{result['total']}**"
+            await msg.reply(
+                f"✅ Collection **{d['col_name']}** created!\n"
+                f"Movies: **{len(movies_list)}** | Total: **{result['total']}**"
             )
-        return await msg.reply(f"❌ Failed: `{result}`")
+        else:
+            await msg.reply(f"❌ Failed: `{result}`")
 
-    # ─── DELETE ───
-    if state == S_DEL_MOVIE:
+    # ── DELETE ────────────────────────────────────────────────────────
+    elif state == S_DEL_MOVIE:
         result = await api_delete(f"/api/movies/{text}")
         clear_state(uid)
         if result and result.get("success"):
-            return await msg.reply(f"✅ Movie `{text}` deleted. Remaining: **{result['count']}**")
-        return await msg.reply(f"❌ {result or 'Failed'}")
+            await msg.reply(f"✅ Movie `{text}` deleted. Remaining: **{result['count']}**")
+        else:
+            await msg.reply(f"❌ {result or 'Failed'}")
 
-    if state == S_DEL_SERIES:
+    elif state == S_DEL_SERIES:
         result = await api_delete(f"/api/series/{text}")
         clear_state(uid)
         if result and result.get("success"):
-            return await msg.reply(f"✅ Series `{text}` deleted. Remaining: **{result['count']}**")
-        return await msg.reply(f"❌ {result or 'Failed'}")
+            await msg.reply(f"✅ Series `{text}` deleted. Remaining: **{result['count']}**")
+        else:
+            await msg.reply(f"❌ {result or 'Failed'}")
 
-    if state == S_DEL_COL:
+    elif state == S_DEL_COL:
         result = await api_delete(f"/api/collections/{text}")
         clear_state(uid)
         if result and result.get("success"):
-            return await msg.reply(f"✅ Collection `{text}` deleted. Total: **{result['total']}**")
-        return await msg.reply(f"❌ {result or 'Failed'}")
+            await msg.reply(f"✅ Collection `{text}` deleted. Total: **{result['total']}**")
+        else:
+            await msg.reply(f"❌ {result or 'Failed'}")
 
-    # ─── EDIT MOVIE ───
-    if state == S_EDIT_MOVIE_ID:
+    # ── EDIT MOVIE ────────────────────────────────────────────────────
+    elif state == S_EDIT_MOVIE_ID:
         movies = await api_get("/api/movies") or []
         movie  = next((m for m in movies if m["id"] == text), None)
         if not movie:
-            return await msg.reply("❌ Movie not found. Enter a valid ID:")
-        update_data(uid, edit_movie=movie)
-        set_state(uid, S_EDIT_MOVIE_FIELD, **get_data(uid))
-        fields = ["extras", "downloads", "subtitles", "tmdb_id", "id"]
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton(f, callback_data=f"ef_{f}")] for f in fields])
-        return await msg.reply(f"🎬 Found: `{text}`\n\nChoose field to edit:", reply_markup=kb)
+            return await msg.reply("❌ Movie not found. Try again or /cancel:")
+        set_state(uid, S_EDIT_MOVIE_VALUE, edit_movie=movie, edit_field=None)
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"✏️ {f}", callback_data=f"ef_{f}")]
+            for f in ["extras", "downloads", "subtitles", "tmdb_id", "id"]
+        ])
+        await msg.reply(f"🎬 Found: `{text}`\n\nChoose field to edit:", reply_markup=kb)
 
-    if state == S_EDIT_MOVIE_VALUE:
-        d = get_data(uid)
+    elif state == S_EDIT_MOVIE_VALUE:
         field = d.get("edit_field")
+        if not field:
+            return await msg.reply("👆 Please choose a field using the buttons above.")
         movie = d.get("edit_movie", {})
         try:
             val = json.loads(text)
@@ -783,158 +833,162 @@ async def on_text(_, msg: Message):
         result = await api_post("/api/movies", movie)
         clear_state(uid)
         if result and result.get("success"):
-            return await msg.reply("✅ Movie updated!")
-        return await msg.reply(f"❌ Failed: `{result}`")
+            await msg.reply(f"✅ `{movie.get('id')}` updated! Field `{field}` saved.")
+        else:
+            await msg.reply(f"❌ Failed: `{result}`")
 
-    # ─── TMDB QUERY ───
-    if state == S_TMDB_QUERY:
-        d = get_data(uid)
-        mtype = d.get("tmdb_type", "movie")
+    # ── TMDB SEARCH ───────────────────────────────────────────────────
+    elif state == S_TMDB_QUERY:
+        mtype   = d.get("tmdb_type", "movie")
         results = await tmdb_search(text, mtype)
         clear_state(uid)
         if not results:
             return await msg.reply("❌ No results found.")
         for r in results[:3]:
-            if mtype == "movie":
-                full = await tmdb_movie(r["id"])
-                if full:
-                    cap  = fmt_movie(full) + f"\n\n🆔 TMDB ID: `{full['id']}`"
-                    p    = poster(full)
-                    if p: await msg.reply_photo(p, caption=cap)
-                    else: await msg.reply(cap)
+            full = await tmdb_movie(r["id"]) if mtype == "movie" else await tmdb_tv(r["id"])
+            if not full:
+                continue
+            cap = (fmt_movie(full) if mtype == "movie" else fmt_tv(full)) + f"\n\n🆔 TMDB ID: `{full['id']}`"
+            p   = poster_url(full)
+            if p:
+                await msg.reply_photo(p, caption=cap)
             else:
-                full = await tmdb_tv(r["id"])
-                if full:
-                    cap  = fmt_tv(full) + f"\n\n🆔 TMDB ID: `{full['id']}`"
-                    p    = poster(full)
-                    if p: await msg.reply_photo(p, caption=cap)
-                    else: await msg.reply(cap)
+                await msg.reply(cap)
 
-# ═══════════════════════════════════════════════════
+
+# ═══════════════════════════════════════
 #  CALLBACK QUERY HANDLER
-# ═══════════════════════════════════════════════════
+# ═══════════════════════════════════════
 @pyro.on_callback_query()
 async def on_cb(_, cb: CallbackQuery):
+    if not cb.from_user:
+        return
     uid  = cb.from_user.id
-    data = cb.data
+    data = cb.data or ""
 
-    # TMDB type selection
+    # ── TMDB type buttons ──
     if data in ("tmdb_movie", "tmdb_tv"):
-        mtype = data.replace("tmdb_", "")
+        mtype = "tv" if data == "tmdb_tv" else "movie"
         set_state(uid, S_TMDB_QUERY, tmdb_type=mtype)
-        await cb.message.edit("🔍 Enter your search query:")
-        return await cb.answer()
+        await cb.answer()
+        await cb.message.edit_text("🔍 Enter your search query:")
+        return
 
-    # Edit field selection
+    # ── Edit field buttons ──
     if data.startswith("ef_"):
         field = data[3:]
-        d = get_data(uid)
-        current = d.get("edit_movie", {}).get(field, "")
         update_data(uid, edit_field=field)
-        set_state(uid, S_EDIT_MOVIE_VALUE, **get_data(uid))
-        await cb.message.edit(
-            f"Current `{field}`: `{json.dumps(current)}`\n\nEnter new value (JSON for objects):"
+        current = get_data(uid).get("edit_movie", {}).get(field, "")
+        await cb.answer(f"Editing: {field}")
+        await cb.message.edit_text(
+            f"Current `{field}`:\n`{json.dumps(current)}`\n\n"
+            "Enter new value (JSON for objects/arrays):"
         )
-        return await cb.answer()
+        return
 
-    # Movie position selection (inline buttons after 1080p)
+    # ── Movie position buttons ──
     if data in ("pos_top", "pos_bottom"):
         if get_state(uid) != S_ADD_MOVIE_POS:
-            return await cb.answer("Session expired. Please start again.", show_alert=True)
+            return await cb.answer("Session expired. Use /cancel and start again.", show_alert=True)
         pos = "top" if data == "pos_top" else "bottom"
-        update_data(uid, pos=pos)          # ← real field name in JSON is "pos"
-        d = get_data(uid)
+        d   = get_data(uid)
+        d["pos"] = pos
         set_state(uid, S_ADD_MOVIE_CONFIRM, **d)
-        await cb.answer(f"Position: {pos}")
-        dl_summary = ", ".join(f"{k}p" for k in sorted(d.get("downloads", {}).keys()))
-        await cb.message.edit(
+        dl  = ", ".join(f"{k}p" for k in sorted(d.get("downloads", {}).keys())) or "none"
+        await cb.answer(f"✅ Position: {pos}")
+        await cb.message.edit_text(
             f"✅ **Confirm Movie**\n\n"
-            f"ID: `{d.get('id','?')}`\n"
-            f"TMDB ID: `{d.get('tmdb_id','?')}`\n"
-            f"Extras: `{d.get('extras','') or '—'}`\n"
-            f"Position: `{pos}`\n"
-            f"Downloads: `{dl_summary or 'none'}`\n"
-            f"Subtitles: `{d.get('subtitles', {}) or 'none'}`\n\n"
+            f"ID: `{d.get('id', '?')}`\n"
+            f"TMDB ID: `{d.get('tmdb_id', '?')}`\n"
+            f"Extras: `{d.get('extras', '') or '—'}`\n"
+            f"Downloads: `{dl}`\n"
+            f"Position: `{pos}`\n\n"
             f"Type **yes** to confirm or **no** to cancel:"
         )
         return
 
-    # Menu buttons
+    # ── Menu buttons ──
     await cb.answer()
 
     if data == "menu_status":
         now    = datetime.now()
         uptime = str(now - BOT_STARTED_AT).split(".")[0]
         try:
+            s = await get_session()
             t0 = datetime.now()
-            async with aiohttp.ClientSession() as s:
-                async with s.get(BACKEND_URL, timeout=aiohttp.ClientTimeout(total=10)) as r:
-                    ms = (datetime.now() - t0).total_seconds() * 1000
-                    ic = "🟢" if r.status == 200 else "🟡"
-                    body = (await r.text())[:60]
-            text = (f"🤖 Bot: 🟢 Online | ⏱ `{uptime}`\n"
-                    f"🖥 Backend: {ic} ⚡`{ms:.0f}ms`\n`{BACKEND_URL}`\n📨`{body}`")
+            async with s.get(BACKEND_URL, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                ms   = (datetime.now() - t0).total_seconds() * 1000
+                ic   = "🟢" if r.status == 200 else "🟡"
+                body = (await r.text())[:60]
+            txt = (f"🤖 Bot: 🟢  |  ⏱ `{uptime}`\n"
+                   f"🖥 Backend: {ic}  ⚡ `{ms:.0f}ms`\n`{BACKEND_URL}`\n📨 `{body}`")
         except Exception as e:
-            text = f"🤖 Bot: 🟢 | 🖥 Backend: 🔴\n❗`{e}`"
-        await cb.message.edit(text)
+            txt = f"🤖 Bot: 🟢  |  ⏱ `{uptime}`\n🖥 Backend: 🔴\n❗ `{e}`"
+        await cb.message.edit_text(txt)
 
     elif data == "menu_stats":
         movies = await api_get("/api/movies") or []
         series = await api_get("/api/series") or []
         cols   = await api_get("/api/collections") or {}
-        await cb.message.edit(
-            f"📊 **Stats**\n\n🎬 Movies: **{len(movies)}**\n📺 Series: **{len(series)}**\n🗂 Collections: **{len(cols)}**"
+        await cb.message.edit_text(
+            f"📊 **Stats**\n\n"
+            f"🎬 Movies: **{len(movies)}**\n"
+            f"📺 Series: **{len(series)}**\n"
+            f"🗂 Collections: **{len(cols)}**"
         )
 
     elif data == "menu_backup":
-        await cb.message.edit("💾 Running backup…")
+        await cb.message.edit_text("💾 Running backup…")
         dest = BACKUP_TARGET or str(cb.message.chat.id)
         ok, info = await perform_backup(pyro, dest)
-        await cb.message.edit(f"✅ Sent to `{info}`." if ok else f"❌ Failed: {info}")
+        await cb.message.edit_text(
+            f"✅ Backup sent to `{info}`." if ok else f"❌ Backup failed:\n`{info}`"
+        )
 
     elif data == "menu_backup_zip":
-        await cb.message.edit("📦 Building ZIP…")
+        await cb.message.edit_text("📦 Building ZIP…")
         try:
             zip_data, ts = await create_zip()
             buf = io.BytesIO(zip_data)
             buf.name = f"backup_all_{ts}.zip"
             await cb.message.reply_document(buf, caption=f"✅ Backup ZIP `{ts}`")
-            await cb.message.edit("✅ ZIP sent.")
+            await cb.message.edit_text("✅ ZIP sent above.")
         except Exception as e:
-            await cb.message.edit(f"❌ ZIP failed: {e}")
+            await cb.message.edit_text(f"❌ ZIP failed:\n`{e}`")
 
     elif data == "menu_movies":
         items = await api_get("/api/movies?limit=10") or []
-        lines = [f"• `{m['id']}` | `{m.get('tmdb_id','?')}`" for m in items[:10]]
-        await cb.message.edit("🎬 **Recent Movies**\n\n" + ("\n".join(lines) or "None"))
+        lines = [f"• `{m.get('id','?')}` | `{m.get('tmdb_id','?')}`" for m in items[:10]]
+        await cb.message.edit_text("🎬 **Recent Movies**\n\n" + ("\n".join(lines) or "None"))
 
     elif data == "menu_series":
         items = await api_get("/api/series?limit=10") or []
-        lines = [f"• `{s['id']}` | {len(s.get('seasons',[]))} season(s)" for s in items[:10]]
-        await cb.message.edit("📺 **Recent Series**\n\n" + ("\n".join(lines) or "None"))
+        lines = [f"• `{s.get('id','?')}` | {len(s.get('seasons',[]))} season(s)" for s in items[:10]]
+        await cb.message.edit_text("📺 **Recent Series**\n\n" + ("\n".join(lines) or "None"))
 
     elif data == "menu_cols":
         cols  = await api_get("/api/collections") or {}
         lines = [f"• `{k}` — {v.get('name','?')}" for k, v in list(cols.items())[:10]]
-        await cb.message.edit("🗂 **Collections**\n\n" + ("\n".join(lines) or "None"))
+        await cb.message.edit_text("🗂 **Collections**\n\n" + ("\n".join(lines) or "None"))
 
     elif data == "menu_tmdb":
-        await cb.message.edit("Use /tmdb command to search TMDB.")
+        await cb.message.edit_text("Use /tmdb to search TMDB.")
 
-# ═══════════════════════════════════════════════════
+
+# ═══════════════════════════════════════
 #  WEB DASHBOARD
-# ═══════════════════════════════════════════════════
+# ═══════════════════════════════════════
 async def web_dashboard(req: web.Request) -> web.Response:
     now    = datetime.now()
     uptime = str(now - BOT_STARTED_AT).split(".")[0]
-    b_status = "offline"; b_code = "N/A"; b_latency_ms = 0.0; b_err = ""
+    b_status = "offline"; b_code = "N/A"; b_ms = 0.0; b_err = ""
     try:
+        s = await get_session()
         t0 = datetime.now()
-        async with aiohttp.ClientSession() as s:
-            async with s.get(BACKEND_URL, timeout=aiohttp.ClientTimeout(total=10)) as r:
-                b_code        = str(r.status)
-                b_latency_ms  = (datetime.now() - t0).total_seconds() * 1000
-                b_status      = "online" if r.status == 200 else "degraded"
+        async with s.get(BACKEND_URL, timeout=aiohttp.ClientTimeout(total=10)) as r:
+            b_code   = str(r.status)
+            b_ms     = (datetime.now() - t0).total_seconds() * 1000
+            b_status = "online" if r.status == 200 else "degraded"
     except Exception as e:
         b_err = str(e)
 
@@ -942,238 +996,211 @@ async def web_dashboard(req: web.Request) -> web.Response:
     series = await api_get("/api/series") or []
     cols   = await api_get("/api/collections") or {}
 
-    bk_text = LAST_BACKUP_AT.strftime("%Y-%m-%d %H:%M:%S") if LAST_BACKUP_AT else "Never"
-    pg_text = LAST_PING_AT.strftime("%Y-%m-%d %H:%M:%S") if LAST_PING_AT else "Never"
+    bk = LAST_BACKUP_AT.strftime("%Y-%m-%d %H:%M") if LAST_BACKUP_AT else "Never"
+    pg = LAST_PING_AT.strftime("%Y-%m-%d %H:%M")   if LAST_PING_AT   else "Never"
 
-    lat_w  = min(max(int(b_latency_ms / 8), 4), 100)
-    lat_c  = "#10b981" if b_latency_ms < 400 else ("#fbbf24" if b_latency_ms < 1000 else "#ef4444")
-    s_icon = {"online": "🟢", "degraded": "🟡", "offline": "🔴"}.get(b_status, "⚪")
+    lat_w = min(max(int(b_ms / 8), 4), 100)
+    lat_c = "#10b981" if b_ms < 400 else ("#fbbf24" if b_ms < 1000 else "#ef4444")
+    s_cls = "ok" if b_status == "online" else ("warn" if b_status == "degraded" else "bad")
+    s_ico = {"online": "🟢", "degraded": "🟡", "offline": "🔴"}.get(b_status, "⚪")
 
-    # Recent movies table rows
-    movie_rows = "".join(
-        f"<tr><td><code>{m.get('id','?')}</code></td><td><code>{m.get('tmdb_id','?')}</code></td>"
-        f"<td>{m.get('extras','—')}</td><td>{'480/720/1080' if m.get('downloads') else '—'}</td></tr>"
+    mv_rows = "".join(
+        f"<tr><td><code>{m.get('id','?')}</code></td>"
+        f"<td><code>{m.get('tmdb_id','?')}</code></td>"
+        f"<td>{m.get('extras','') or '—'}</td>"
+        f"<td>{'✅' if m.get('downloads') else '—'}</td></tr>"
         for m in movies[:8]
     )
-    series_rows = "".join(
-        f"<tr><td><code>{s.get('id','?')}</code></td><td><code>{s.get('tmdb_id','?')}</code></td>"
+    sr_rows = "".join(
+        f"<tr><td><code>{s.get('id','?')}</code></td>"
+        f"<td><code>{s.get('tmdb_id','?')}</code></td>"
         f"<td>{len(s.get('seasons',[]))}</td></tr>"
         for s in series[:8]
     )
-    col_rows = "".join(
-        f"<tr><td><code>{k}</code></td><td>{v.get('name','?')}</td><td>{len(v.get('movies',[]))}</td></tr>"
+    co_rows = "".join(
+        f"<tr><td><code>{k}</code></td><td>{v.get('name','?')}</td>"
+        f"<td>{len(v.get('movies',[]))}</td></tr>"
         for k, v in list(cols.items())[:8]
     )
+    empty = "<tr><td colspan='4' style='text-align:center;color:var(--muted);padding:1.5rem'>No data</td></tr>"
 
     html = f"""<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>SCFiles · Dashboard</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@400;600;700&display=swap" rel="stylesheet">
   <style>
-    :root{{
-      --bg:#060a12;--surface:#0c1220;--surface2:#111b2e;--border:#1c2840;
+    :root{{--bg:#060a12;--surface:#0c1220;--surface2:#111b2e;--border:#1c2840;
       --text:#dde8f8;--muted:#5d7a9e;--ok:#00e5a0;--warn:#ffb340;--bad:#ff4d6d;
-      --accent:#4f8ef7;--accent2:#7c5bf7;--mono:'Space Mono',monospace;--sans:'DM Sans',sans-serif;
-    }}
+      --accent:#4f8ef7;--accent2:#7c5bf7;--mono:'Space Mono',monospace;--sans:'DM Sans',sans-serif;}}
     *{{box-sizing:border-box;margin:0;padding:0}}
-    body{{background:var(--bg);color:var(--text);font-family:var(--sans);min-height:100vh;}}
-
-    /* animated mesh bg */
-    body::before{{
-      content:'';position:fixed;inset:0;z-index:0;
-      background:radial-gradient(ellipse 80% 60% at 10% 10%,rgba(79,142,247,.07) 0%,transparent 60%),
-                 radial-gradient(ellipse 60% 50% at 90% 80%,rgba(124,91,247,.06) 0%,transparent 60%);
-      pointer-events:none;
-    }}
-
-    .wrap{{position:relative;z-index:1;max-width:1100px;margin:0 auto;padding:2rem 1.5rem;}}
-
-    /* HEADER */
-    header{{display:flex;justify-content:space-between;align-items:center;margin-bottom:2.5rem;gap:1rem;flex-wrap:wrap;}}
+    body{{background:var(--bg);color:var(--text);font-family:var(--sans);min-height:100vh;padding:2rem 1.5rem;max-width:1100px;margin:0 auto;}}
+    body::before{{content:'';position:fixed;inset:0;z-index:-1;
+      background:radial-gradient(ellipse 80% 60% at 10% 10%,rgba(79,142,247,.07),transparent 60%),
+                 radial-gradient(ellipse 60% 50% at 90% 80%,rgba(124,91,247,.06),transparent 60%);}}
+    header{{display:flex;justify-content:space-between;align-items:center;margin-bottom:2rem;flex-wrap:wrap;gap:1rem;}}
     .logo{{display:flex;align-items:center;gap:.75rem;}}
-    .logo-icon{{width:40px;height:40px;border-radius:10px;background:linear-gradient(135deg,var(--accent),var(--accent2));display:flex;align-items:center;justify-content:center;font-size:1.2rem;}}
-    h1{{font-family:var(--mono);font-size:1.3rem;letter-spacing:-.5px;}}
-    h1 span{{color:var(--accent);}}
-    .live-badge{{display:flex;align-items:center;gap:6px;font-size:.78rem;color:var(--muted);font-family:var(--mono);}}
+    .logo-icon{{width:42px;height:42px;border-radius:10px;background:linear-gradient(135deg,var(--accent),var(--accent2));display:flex;align-items:center;justify-content:center;font-size:1.3rem;}}
+    h1{{font-family:var(--mono);font-size:1.25rem;}} h1 span{{color:var(--accent);}}
+    .live{{display:flex;align-items:center;gap:6px;font-size:.78rem;color:var(--muted);font-family:var(--mono);}}
     .dot{{width:7px;height:7px;border-radius:50%;background:var(--ok);animation:blink 1.8s infinite;}}
     @keyframes blink{{0%,100%{{opacity:1}}50%{{opacity:.2}}}}
-
-    /* KPI CARDS */
-    .kpi-row{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1rem;margin-bottom:1.5rem;}}
-    .kpi{{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:1.2rem 1.4rem;position:relative;overflow:hidden;transition:transform .2s;}}
-    .kpi:hover{{transform:translateY(-3px);}}
-    .kpi::after{{content:'';position:absolute;inset:0;background:linear-gradient(135deg,rgba(79,142,247,.04),transparent);pointer-events:none;}}
-    .kpi-label{{font-size:.72rem;font-family:var(--mono);color:var(--muted);text-transform:uppercase;letter-spacing:1px;}}
-    .kpi-val{{font-size:2.4rem;font-weight:700;margin-top:.3rem;font-family:var(--mono);background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;}}
-    .kpi-sub{{font-size:.72rem;color:var(--muted);margin-top:.2rem;}}
-
-    /* STATUS PANEL */
-    .status-grid{{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1.5rem;}}
-    @media(max-width:640px){{.status-grid{{grid-template-columns:1fr;}}}}
+    .kpi-row{{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:1rem;margin-bottom:1.5rem;}}
+    .kpi{{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:1.2rem 1.4rem;transition:background .2s;}}
+    .kpi:hover{{background:var(--surface2);}}
+    .kpi-label{{font-size:.7rem;font-family:var(--mono);color:var(--muted);text-transform:uppercase;letter-spacing:1px;}}
+    .kpi-val{{font-size:2.2rem;font-weight:700;margin-top:.25rem;font-family:var(--mono);
+      background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;}}
+    .kpi-sub{{font-size:.7rem;color:var(--muted);margin-top:.15rem;}}
+    .panels{{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1.5rem;}}
+    @media(max-width:600px){{.panels{{grid-template-columns:1fr;}}}}
     .panel{{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:1.4rem;}}
-    .panel-title{{font-family:var(--mono);font-size:.78rem;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin-bottom:1rem;display:flex;align-items:center;gap:.5rem;}}
-    .row{{display:flex;justify-content:space-between;align-items:center;padding:.5rem 0;border-bottom:1px solid rgba(255,255,255,.04);font-size:.88rem;}}
+    .panel-title{{font-family:var(--mono);font-size:.72rem;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin-bottom:1rem;}}
+    .row{{display:flex;justify-content:space-between;align-items:center;padding:.45rem 0;border-bottom:1px solid rgba(255,255,255,.04);font-size:.86rem;}}
     .row:last-child{{border-bottom:none;}}
-    .row .label{{color:var(--muted);}}
-    .tag{{font-family:var(--mono);font-size:.8rem;background:rgba(255,255,255,.05);padding:2px 8px;border-radius:6px;}}
+    .label{{color:var(--muted);}} .tag{{font-family:var(--mono);font-size:.76rem;background:rgba(255,255,255,.05);padding:2px 7px;border-radius:5px;}}
     .ok{{color:var(--ok);font-weight:600;}} .warn{{color:var(--warn);font-weight:600;}} .bad{{color:var(--bad);font-weight:600;}}
-
-    /* LATENCY BAR */
     .lat-track{{height:3px;background:rgba(255,255,255,.07);border-radius:2px;margin-top:.8rem;overflow:hidden;}}
-    .lat-fill{{height:100%;border-radius:2px;transition:width .6s ease;}}
-
-    /* TABLES */
+    .lat-fill{{height:100%;border-radius:2px;}}
     .section{{margin-bottom:1.5rem;}}
-    .section-header{{font-family:var(--mono);font-size:.78rem;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin-bottom:.8rem;display:flex;align-items:center;justify-content:space-between;}}
-    .section-header a{{color:var(--accent);text-decoration:none;font-size:.72rem;}}
+    .section-title{{font-family:var(--mono);font-size:.72rem;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin-bottom:.75rem;}}
     .table-wrap{{background:var(--surface);border:1px solid var(--border);border-radius:14px;overflow:hidden;}}
-    table{{width:100%;border-collapse:collapse;font-size:.85rem;}}
-    th{{background:var(--surface2);padding:.7rem 1rem;text-align:left;font-family:var(--mono);font-size:.7rem;text-transform:uppercase;letter-spacing:.8px;color:var(--muted);font-weight:400;}}
-    td{{padding:.65rem 1rem;border-top:1px solid rgba(255,255,255,.04);}}
+    table{{width:100%;border-collapse:collapse;font-size:.84rem;}}
+    th{{background:var(--surface2);padding:.65rem 1rem;text-align:left;font-family:var(--mono);font-size:.68rem;text-transform:uppercase;letter-spacing:.8px;color:var(--muted);}}
+    td{{padding:.6rem 1rem;border-top:1px solid rgba(255,255,255,.04);}}
     tr:hover td{{background:rgba(255,255,255,.02);}}
-    code{{font-family:var(--mono);font-size:.78rem;color:var(--accent);background:rgba(79,142,247,.1);padding:1px 5px;border-radius:4px;}}
-
-    /* ACTIONS */
-    .actions{{display:flex;gap:.75rem;flex-wrap:wrap;margin-bottom:2rem;}}
-    .btn{{display:inline-flex;align-items:center;gap:.4rem;padding:.65rem 1.2rem;border-radius:10px;font-weight:600;font-size:.85rem;text-decoration:none;transition:all .2s;border:1px solid transparent;cursor:pointer;}}
-    .btn-primary{{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;box-shadow:0 4px 20px rgba(79,142,247,.25);}}
-    .btn-primary:hover{{transform:translateY(-2px);box-shadow:0 6px 24px rgba(79,142,247,.35);}}
+    code{{font-family:var(--mono);font-size:.76rem;color:var(--accent);background:rgba(79,142,247,.1);padding:1px 5px;border-radius:4px;}}
+    .actions{{display:flex;gap:.75rem;flex-wrap:wrap;margin-bottom:1.5rem;}}
+    .btn{{display:inline-flex;align-items:center;gap:.4rem;padding:.6rem 1.1rem;border-radius:9px;font-weight:600;font-size:.84rem;text-decoration:none;transition:all .2s;border:1px solid transparent;}}
+    .btn-primary{{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;box-shadow:0 4px 16px rgba(79,142,247,.2);}}
+    .btn-primary:hover{{transform:translateY(-2px);}}
     .btn-outline{{border-color:var(--border);color:var(--text);background:var(--surface);}}
     .btn-outline:hover{{border-color:var(--accent);color:var(--accent);}}
-
-    footer{{text-align:center;color:var(--muted);font-size:.75rem;font-family:var(--mono);padding-top:2rem;border-top:1px solid var(--border);}}
+    footer{{text-align:center;color:var(--muted);font-size:.72rem;font-family:var(--mono);padding-top:2rem;border-top:1px solid var(--border);margin-top:1rem;}}
   </style>
 </head>
 <body>
-<div class="wrap">
-  <header>
-    <div class="logo">
-      <div class="logo-icon">🎛</div>
-      <div><h1>SC<span>Files</span></h1><div style="font-size:.72rem;color:var(--muted);font-family:var(--mono);">backend manager</div></div>
-    </div>
-    <div class="live-badge"><div class="dot"></div>LIVE · {now.strftime("%H:%M:%S")}</div>
-  </header>
-
-  <!-- KPI -->
-  <div class="kpi-row">
-    <div class="kpi"><div class="kpi-label">Movies</div><div class="kpi-val">{len(movies)}</div><div class="kpi-sub">in database</div></div>
-    <div class="kpi"><div class="kpi-label">Series</div><div class="kpi-val">{len(series)}</div><div class="kpi-sub">in database</div></div>
-    <div class="kpi"><div class="kpi-label">Collections</div><div class="kpi-val">{len(cols)}</div><div class="kpi-sub">in database</div></div>
-    <div class="kpi"><div class="kpi-label">Latency</div><div class="kpi-val" style="font-size:1.6rem;">{b_latency_ms:.0f}<span style="font-size:1rem;-webkit-text-fill-color:var(--muted);">ms</span></div><div class="kpi-sub">backend ping</div></div>
+<header>
+  <div class="logo">
+    <div class="logo-icon">🎛</div>
+    <div><h1>SC<span>Files</span></h1><div style="font-size:.68rem;color:var(--muted);font-family:var(--mono)">backend manager</div></div>
   </div>
+  <div class="live"><div class="dot"></div>LIVE · {now.strftime("%H:%M:%S")}</div>
+</header>
 
-  <!-- STATUS PANELS -->
-  <div class="status-grid">
-    <div class="panel">
-      <div class="panel-title">🤖 Bot</div>
-      <div class="row"><span class="label">Status</span><span class="ok">ONLINE</span></div>
-      <div class="row"><span class="label">Uptime</span><span class="tag">{uptime}</span></div>
-      <div class="row"><span class="label">Last Backup</span><span class="tag">{bk_text}</span></div>
-      <div class="row"><span class="label">Last Ping</span><span class="tag">{pg_text}</span></div>
-      <div class="row"><span class="label">Backup Chat</span><span class="tag">{BACKUP_TARGET or '—'}</span></div>
-    </div>
-    <div class="panel">
-      <div class="panel-title">🌐 Backend</div>
-      <div class="row"><span class="label">Status</span><span class="{'ok' if b_status=='online' else 'warn' if b_status=='degraded' else 'bad'}">{s_icon} {b_status.upper()}</span></div>
-      <div class="row"><span class="label">HTTP Code</span><span class="tag">{b_code}</span></div>
-      <div class="row"><span class="label">Latency</span><span class="tag">{b_latency_ms:.0f}ms</span></div>
-      <div class="row"><span class="label">URL</span><span class="tag" style="max-width:180px;overflow:hidden;text-overflow:ellipsis;">{BACKEND_URL}</span></div>
-      {"<div class='row'><span class='label'>Error</span><span class='bad' style='font-size:.78rem'>"+b_err[:50]+"</span></div>" if b_err else ""}
-      <div class="lat-track"><div class="lat-fill" style="width:{lat_w}%;background:{lat_c};"></div></div>
-    </div>
-  </div>
-
-  <!-- ACTIONS -->
-  <div class="actions">
-    <a class="btn btn-primary" href="/backup/all">📦 Download Backup ZIP</a>
-    <a class="btn btn-outline" href="/health">📡 JSON Health</a>
-    <a class="btn btn-outline" href="javascript:location.reload()">🔄 Refresh</a>
-  </div>
-
-  <!-- MOVIES TABLE -->
-  <div class="section">
-    <div class="section-header"><span>🎬 Recent Movies</span><span>Top 8</span></div>
-    <div class="table-wrap">
-      <table>
-        <thead><tr><th>ID</th><th>TMDB ID</th><th>Extras</th><th>Downloads</th></tr></thead>
-        <tbody>{movie_rows or "<tr><td colspan='4' style='text-align:center;color:var(--muted)'>No data</td></tr>"}</tbody>
-      </table>
-    </div>
-  </div>
-
-  <!-- SERIES TABLE -->
-  <div class="section">
-    <div class="section-header"><span>📺 Recent Series</span><span>Top 8</span></div>
-    <div class="table-wrap">
-      <table>
-        <thead><tr><th>ID</th><th>TMDB ID</th><th>Seasons</th></tr></thead>
-        <tbody>{series_rows or "<tr><td colspan='3' style='text-align:center;color:var(--muted)'>No data</td></tr>"}</tbody>
-      </table>
-    </div>
-  </div>
-
-  <!-- COLLECTIONS TABLE -->
-  <div class="section">
-    <div class="section-header"><span>🗂 Collections</span><span>Top 8</span></div>
-    <div class="table-wrap">
-      <table>
-        <thead><tr><th>ID</th><th>Name</th><th>Movies</th></tr></thead>
-        <tbody>{col_rows or "<tr><td colspan='3' style='text-align:center;color:var(--muted)'>No data</td></tr>"}</tbody>
-      </table>
-    </div>
-  </div>
-
-  <footer>SCFiles Bot Dashboard · Auto-refresh every 60s · {now.strftime("%Y-%m-%d %H:%M:%S")}</footer>
+<div class="kpi-row">
+  <div class="kpi"><div class="kpi-label">Movies</div><div class="kpi-val">{len(movies)}</div><div class="kpi-sub">in database</div></div>
+  <div class="kpi"><div class="kpi-label">Series</div><div class="kpi-val">{len(series)}</div><div class="kpi-sub">in database</div></div>
+  <div class="kpi"><div class="kpi-label">Collections</div><div class="kpi-val">{len(cols)}</div><div class="kpi-sub">in database</div></div>
+  <div class="kpi"><div class="kpi-label">Latency</div>
+    <div class="kpi-val" style="font-size:1.5rem">{b_ms:.0f}<span style="font-size:.9rem;-webkit-text-fill-color:var(--muted)">ms</span></div>
+    <div class="kpi-sub">backend ping</div></div>
 </div>
+
+<div class="panels">
+  <div class="panel">
+    <div class="panel-title">🤖 Bot</div>
+    <div class="row"><span class="label">Status</span><span class="ok">ONLINE</span></div>
+    <div class="row"><span class="label">Uptime</span><span class="tag">{uptime}</span></div>
+    <div class="row"><span class="label">Last Backup</span><span class="tag">{bk}</span></div>
+    <div class="row"><span class="label">Last Ping</span><span class="tag">{pg}</span></div>
+    <div class="row"><span class="label">Backup Chat</span><span class="tag">{BACKUP_TARGET or '—'}</span></div>
+  </div>
+  <div class="panel">
+    <div class="panel-title">🌐 Backend</div>
+    <div class="row"><span class="label">Status</span><span class="{s_cls}">{s_ico} {b_status.upper()}</span></div>
+    <div class="row"><span class="label">HTTP Code</span><span class="tag">{b_code}</span></div>
+    <div class="row"><span class="label">Latency</span><span class="tag">{b_ms:.0f}ms</span></div>
+    <div class="row"><span class="label">URL</span><span class="tag" style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{BACKEND_URL}</span></div>
+    {"<div class='row'><span class='label'>Error</span><span class='bad' style='font-size:.75rem'>"+b_err[:60]+"</span></div>" if b_err else ""}
+    <div class="lat-track"><div class="lat-fill" style="width:{lat_w}%;background:{lat_c}"></div></div>
+  </div>
+</div>
+
+<div class="actions">
+  <a class="btn btn-primary" href="/backup/all">📦 Download Backup ZIP</a>
+  <a class="btn btn-outline"  href="/logs">📋 View Logs</a>
+  <a class="btn btn-outline"  href="/health">📡 JSON Health</a>
+  <a class="btn btn-outline"  href="javascript:location.reload()">🔄 Refresh</a>
+</div>
+
+<div class="section">
+  <div class="section-title">🎬 Recent Movies</div>
+  <div class="table-wrap"><table>
+    <thead><tr><th>ID</th><th>TMDB ID</th><th>Extras</th><th>Links</th></tr></thead>
+    <tbody>{mv_rows or empty}</tbody>
+  </table></div>
+</div>
+<div class="section">
+  <div class="section-title">📺 Recent Series</div>
+  <div class="table-wrap"><table>
+    <thead><tr><th>ID</th><th>TMDB ID</th><th>Seasons</th></tr></thead>
+    <tbody>{sr_rows or empty}</tbody>
+  </table></div>
+</div>
+<div class="section">
+  <div class="section-title">🗂 Collections</div>
+  <div class="table-wrap"><table>
+    <thead><tr><th>ID</th><th>Name</th><th>Movies</th></tr></thead>
+    <tbody>{co_rows or empty}</tbody>
+  </table></div>
+</div>
+
+<footer>SCFiles Bot Dashboard · Auto-refresh 60s · {now.strftime("%Y-%m-%d %H:%M:%S")}</footer>
 <script>setTimeout(()=>location.reload(),60000);</script>
-</body>
-</html>"""
+</body></html>"""
     return web.Response(text=html, content_type="text/html")
 
+
 async def web_health_json(req: web.Request) -> web.Response:
-    now = datetime.now()
+    now     = datetime.now()
     backend = {"status": "offline", "http_status": None, "latency_ms": None, "error": None}
     try:
+        s = await get_session()
         t0 = datetime.now()
-        async with aiohttp.ClientSession() as s:
-            async with s.get(BACKEND_URL, timeout=aiohttp.ClientTimeout(total=10)) as r:
-                backend["http_status"] = r.status
-                backend["latency_ms"]  = round((datetime.now() - t0).total_seconds() * 1000, 2)
-                backend["status"]      = "online" if r.status == 200 else "degraded"
+        async with s.get(BACKEND_URL, timeout=aiohttp.ClientTimeout(total=10)) as r:
+            backend["http_status"] = r.status
+            backend["latency_ms"]  = round((datetime.now() - t0).total_seconds() * 1000, 2)
+            backend["status"]      = "online" if r.status == 200 else "degraded"
     except Exception as e:
         backend["error"] = str(e)
     movies = await api_get("/api/movies") or []
     series = await api_get("/api/series") or []
     cols   = await api_get("/api/collections") or {}
     return web.json_response({
-        "bot": {
-            "status": "online",
-            "uptime_seconds": int((now - BOT_STARTED_AT).total_seconds()),
-            "last_backup_at": LAST_BACKUP_AT.isoformat() if LAST_BACKUP_AT else None,
-            "last_ping_at": LAST_PING_AT.isoformat() if LAST_PING_AT else None,
-        },
+        "bot":     {"status": "online",
+                    "uptime_seconds": int((now - BOT_STARTED_AT).total_seconds()),
+                    "last_backup_at": LAST_BACKUP_AT.isoformat() if LAST_BACKUP_AT else None,
+                    "last_ping_at":   LAST_PING_AT.isoformat()   if LAST_PING_AT   else None},
         "backend": backend,
-        "db": {"movies": len(movies), "series": len(series), "collections": len(cols)},
-        "time": now.isoformat(),
+        "db":      {"movies": len(movies), "series": len(series), "collections": len(cols)},
+        "time":    now.isoformat(),
     })
 
 async def web_backup_zip(req: web.Request) -> web.Response:
     data, ts = await create_zip()
-    return web.Response(
-        body=data,
-        headers={
-            "Content-Type": "application/zip",
-            "Content-Disposition": f'attachment; filename="backup_all_{ts}.zip"',
-        },
-    )
+    return web.Response(body=data, headers={
+        "Content-Type":        "application/zip",
+        "Content-Disposition": f'attachment; filename="backup_all_{ts}.zip"',
+    })
 
-# ═══════════════════════════════════════════════════
+async def web_logs(req: web.Request) -> web.Response:
+    if not os.path.exists(LOG_FILE):
+        return web.Response(text="No log file yet.", content_type="text/plain")
+    with open(LOG_FILE, "rb") as f:
+        f.seek(0, 2); size = f.tell()
+        f.seek(max(0, size - 32768))  # last 32 KB
+        tail = f.read()
+    return web.Response(body=tail, headers={
+        "Content-Type":        "text/plain; charset=utf-8",
+        "Content-Disposition": "inline; filename=bot.log",
+    })
+
+
+# ═══════════════════════════════════════
 #  SCHEDULER JOBS
-# ═══════════════════════════════════════════════════
+# ═══════════════════════════════════════
 async def job_backup():
     ok, info = await perform_backup(pyro)
     logger.info("Scheduled backup → ok=%s info=%s", ok, info)
@@ -1183,62 +1210,78 @@ async def job_ping():
     urls = [BACKEND_URL]
     if BOT_WEB_URL:
         urls.append(f"{BOT_WEB_URL}/health")
-    async with aiohttp.ClientSession() as s:
-        for url in urls:
-            try:
-                async with s.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
-                    logger.info("Ping %s → %s", url, r.status)
-            except Exception as e:
-                logger.warning("Ping failed %s → %s", url, e)
+    s = await get_session()
+    for url in urls:
+        try:
+            async with s.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                logger.info("Ping %s → %s", url, r.status)
+        except Exception as e:
+            logger.warning("Ping failed %s: %s", url, e)
     LAST_PING_AT = datetime.now()
 
-# ═══════════════════════════════════════════════════
+
+# ═══════════════════════════════════════
 #  MAIN
-# ═══════════════════════════════════════════════════
+# ═══════════════════════════════════════
 async def main():
     global BACKUP_TARGET
     BACKUP_TARGET = load_backup_target()
 
+    logger.info("=" * 60)
+    logger.info("SCFiles Bot starting…")
+    logger.info("Backend URL : %s", BACKEND_URL)
+    logger.info("Admin IDs   : %s", ADMIN_IDS or "ALL (open)")
+    logger.info("Backup chat : %s", BACKUP_TARGET or "NOT SET")
+    logger.info("Web port    : %s", WEB_PORT)
+    logger.info("=" * 60)
+
     # Web server
     web_app = web.Application()
-    web_app.router.add_get("/", web_dashboard)
-    web_app.router.add_get("/health", web_health_json)
+    web_app.router.add_get("/",           web_dashboard)
+    web_app.router.add_get("/health",     web_health_json)
     web_app.router.add_get("/backup/all", web_backup_zip)
+    web_app.router.add_get("/logs",       web_logs)
     runner = web.AppRunner(web_app)
     await runner.setup()
-    site = web.TCPSite(runner, WEB_HOST, WEB_PORT)
-    await site.start()
+    await web.TCPSite(runner, WEB_HOST, WEB_PORT).start()
     logger.info("Web dashboard running on %s:%s", WEB_HOST, WEB_PORT)
 
     # Scheduler
     scheduler = AsyncIOScheduler(timezone="Asia/Kolkata")
     scheduler.add_job(job_backup, "interval", days=2)
     scheduler.add_job(job_ping,   "interval", minutes=AUTO_PING_MIN,
-                      next_run_time=datetime.now() + timedelta(seconds=20))
+                      next_run_time=datetime.now() + timedelta(seconds=30))
     scheduler.start()
+    logger.info("Scheduler started — backup every 2 days, ping every %d min", AUTO_PING_MIN)
 
-    # Notify admins if backup not configured
-    if not BACKUP_TARGET:
-        logger.warning("No backup chat set. Use /setbackup <chat_id>")
-
-    # Start bot
+    # Start Pyrogram
     await pyro.start()
-    logger.info("Bot started.")
+    me = await pyro.get_me()
+    logger.info("Bot online: @%s (id=%s)", me.username, me.id)
 
     if not BACKUP_TARGET:
+        logger.warning("No backup chat configured — use /setbackup <chat_id>")
         for aid in ADMIN_IDS[:3]:
             try:
-                await pyro.send_message(aid,
-                    "⚠️ Backup channel is not configured.\nUse `/setbackup <chat_id>` to enable auto backups.")
+                await pyro.send_message(
+                    aid,
+                    "⚠️ **Backup channel not configured.**\n"
+                    "Use `/setbackup <chat_id>` to enable auto-backups."
+                )
             except Exception:
                 pass
 
     try:
-        await asyncio.Event().wait()  # run forever
+        await asyncio.Event().wait()   # run forever
     finally:
+        logger.info("Shutting down…")
+        global _SESSION
+        if _SESSION and not _SESSION.closed:
+            await _SESSION.close()
         await pyro.stop()
         await runner.cleanup()
         scheduler.shutdown(wait=False)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
