@@ -145,6 +145,14 @@ You can change the destination at runtime:
 
 This value is persisted in `.backup_config.json` (configurable via `BACKUP_CONFIG_FILE`).
 
+You can change the destination at runtime:
+
+```bash
+/setbackup <chat_id>
+```
+
+This value is persisted in `.backup_config.json` (configurable via `BACKUP_CONFIG_FILE`).
+
 ---
 
 ## 💾 Backup

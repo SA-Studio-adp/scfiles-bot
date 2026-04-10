@@ -58,6 +58,7 @@ BOT_STARTED_AT   = now_ist()
 LAST_BACKUP_AT   = None
 LAST_AUTO_PING_AT = None
 BACKUP_CHAT_TARGET = BACKUP_CHAT_ID
+WEB_RUNNER = None
 BOT_COMMANDS = [
     ("start", "Main menu"),
     ("help", "Show available commands"),
@@ -486,7 +487,7 @@ async def addmovie_pos_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"ID: `{movie.get('id','?')}`\n"
         f"TMDB: `{movie.get('tmdb_id','?')}`\n"
         f"Extras: `{movie.get('extras','')}`\n"
-        f"Position: `{movie.get('position','top')}`\n"
+        f"Position: `{movie.get('position','bottom')}`\n"
         f"Downloads: `{json.dumps(movie.get('downloads', {}))}`\n\n"
         f"Type *yes* to confirm or *no* to cancel:"
     )
@@ -928,37 +929,9 @@ async def web_logs_handler(request: web.Request) -> web.StreamResponse:
         },
     )
 
-async def web_logs_handler(request: web.Request) -> web.StreamResponse:
-    tail = read_log_tail()
-    if not tail:
-        return web.Response(text="No logs available yet.", content_type="text/plain")
-    return web.Response(
-        body=tail,
-        headers={
-            "Content-Type": "text/plain; charset=utf-8",
-            "Content-Disposition": 'inline; filename="bot.log"',
-        },
-    )
-
-    # ── Movie position buttons ──
-    if data in ("pos_top", "pos_bottom"):
-        if get_state(uid) != S_ADD_MOVIE_POS:
-            return await cb.answer("Session expired. Use /cancel and start again.", show_alert=True)
-        pos = "top" if data == "pos_top" else "bottom"
-        d   = get_data(uid)
-        d["pos"] = pos
-        set_state(uid, S_ADD_MOVIE_CONFIRM, **d)
-        dl  = ", ".join(f"{k}p" for k in sorted(d.get("downloads", {}).keys())) or "none"
-        await cb.answer(f"✅ Position: {pos}")
-        await cb.message.edit_text(
-            f"✅ **Confirm Movie**\n\n"
-            f"ID: `{d.get('id', '?')}`\n"
-            f"TMDB ID: `{d.get('tmdb_id', '?')}`\n"
-            f"Extras: `{d.get('extras', '') or '—'}`\n"
-            f"Downloads: `{dl}`\n"
-            f"Position: `{pos}`\n\n"
-            f"Type **yes** to confirm or **no** to cancel:"
-        )
+async def cmd_backupall(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ Access denied.")
         return
     await update.message.reply_text("💾 Starting backup…")
     fallback_chat = str(update.effective_chat.id)
@@ -975,16 +948,47 @@ async def cmd_backupall(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ Access denied.")
         return
-    await update.message.reply_text("💾 Starting backup…")
-    fallback_chat = str(update.effective_chat.id)
-    success, info = await perform_backup(ctx.application, target_chat_id=BACKUP_CHAT_TARGET or fallback_chat)
-    if success:
-        await update.message.reply_text(f"✅ Backup sent to `{info}`.", parse_mode=ParseMode.MARKDOWN)
-    else:
+    await update.message.reply_text("📦 Preparing backup ZIP…")
+    try:
+        zip_bytes, ts = await create_backup_zip_bytes()
+        await update.message.reply_document(
+            document=zip_bytes,
+            filename=f"backup_all_{ts}.zip",
+            caption="✅ Backup ZIP ready.",
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Failed to build ZIP backup.\n`{e}`", parse_mode=ParseMode.MARKDOWN)
+
+@admin_only
+async def cmd_setbackup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    global BACKUP_CHAT_TARGET
+    if not ctx.args:
+        current = BACKUP_CHAT_TARGET or "Not configured"
         await update.message.reply_text(
-            f"❌ Backup failed: `{info}`\n\nSet/verify backup channel using `/setbackup <chat_id>`.",
+            f"📦 Current backup chat: `{current}`\n\nUsage:\n`/setbackup <chat_id>`",
             parse_mode=ParseMode.MARKDOWN,
         )
+        return
+    chat_id = ctx.args[0].strip()
+    BACKUP_CHAT_TARGET = chat_id
+    save_backup_chat_target(chat_id)
+    await update.message.reply_text(
+        f"✅ Backup chat updated to `{chat_id}`.\nAll auto/manual backups will use this chat.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+@admin_only
+async def cmd_logs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    tail = read_log_tail()
+    if not tail:
+        await update.message.reply_text("📭 No logs available yet.")
+        return
+    ts = now_ist().strftime("%Y-%m-%d_%H-%M-%S")
+    await update.message.reply_document(
+        document=tail,
+        filename=f"bot_logs_{ts}.txt",
+        caption=f"📋 Last {max(1, len(tail)//1024)}KB logs",
+    )
 
 async def cmd_backupall(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
@@ -1258,12 +1262,6 @@ def main():
         minutes=AUTO_PING_INTERVAL_MIN,
         next_run_time=now_ist() + timedelta(seconds=30),
     )
-    scheduler.add_job(
-        auto_ping_services,
-        trigger="interval",
-        minutes=AUTO_PING_INTERVAL_MIN,
-        next_run_time=datetime.now() + timedelta(seconds=30),
-    )
 
 
 # ═══════════════════════════════════════
@@ -1284,17 +1282,17 @@ async def web_dashboard(req: web.Request) -> web.Response:
         b_err = str(e)
 
     async def on_startup(application: Application):
+        global WEB_RUNNER
         global BACKUP_CHAT_TARGET
         BACKUP_CHAT_TARGET = load_backup_chat_target()
-        nonlocal web_runner
         web_app = web.Application()
         web_app.router.add_get("/", web_health_handler)
         web_app.router.add_get("/health", web_json_health_handler)
         web_app.router.add_get("/backup/all", web_backup_all_handler)
         web_app.router.add_get("/logs", web_logs_handler)
-        web_runner = web.AppRunner(web_app)
-        await web_runner.setup()
-        site = web.TCPSite(web_runner, host=WEB_HOST, port=WEB_PORT)
+        WEB_RUNNER = web.AppRunner(web_app)
+        await WEB_RUNNER.setup()
+        site = web.TCPSite(WEB_RUNNER, host=WEB_HOST, port=WEB_PORT)
         await site.start()
         await register_bot_commands(application)
         if not BACKUP_CHAT_TARGET:
@@ -1313,8 +1311,10 @@ async def web_dashboard(req: web.Request) -> web.Response:
         logger.info("Web service started on %s:%s", WEB_HOST, WEB_PORT)
 
     async def on_shutdown(application: Application):
-        if web_runner:
-            await web_runner.cleanup()
+        global WEB_RUNNER
+        if WEB_RUNNER:
+            await WEB_RUNNER.cleanup()
+            WEB_RUNNER = None
         scheduler.shutdown(wait=False)
         logger.info("Scheduler and web service shut down.")
 
