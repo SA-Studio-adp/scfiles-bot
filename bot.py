@@ -63,6 +63,7 @@ S_ADD_MOVIE_EXTRA   = "add_movie_extra"
 S_ADD_MOVIE_DL480   = "add_movie_dl480"
 S_ADD_MOVIE_DL720   = "add_movie_dl720"
 S_ADD_MOVIE_DL1080  = "add_movie_dl1080"
+S_ADD_MOVIE_POS     = "add_movie_pos"
 S_ADD_MOVIE_CONFIRM = "add_movie_confirm"
 S_ADD_SERIES_TMDB   = "add_series_tmdb"
 S_ADD_SERIES_JSON   = "add_series_json"
@@ -564,16 +565,12 @@ async def on_text(_, msg: Message):
             d = get_data(uid)
             d["downloads"]["1080"] = text
             update_data(uid, downloads=d["downloads"])
-        d = get_data(uid)
-        set_state(uid, S_ADD_MOVIE_CONFIRM, **d)
-        return await msg.reply(
-            f"✅ **Confirm Movie**\n\n"
-            f"ID: `{d.get('id','?')}`\n"
-            f"TMDB: `{d.get('tmdb_id','?')}`\n"
-            f"Extras: `{d.get('extras','')}`\n"
-            f"Downloads: `{json.dumps(d.get('downloads', {}))}`\n\n"
-            f"Type **yes** to confirm or **no** to cancel:"
-        )
+        set_state(uid, S_ADD_MOVIE_POS, **get_data(uid))
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("⬆️ Top", callback_data="pos_top"),
+            InlineKeyboardButton("⬇️ Bottom", callback_data="pos_bottom"),
+        ]])
+        return await msg.reply("📌 Where should this movie be added?", reply_markup=kb)
 
     if state == S_ADD_MOVIE_CONFIRM:
         if text.lower() != "yes":
@@ -584,7 +581,8 @@ async def on_text(_, msg: Message):
         result = await api_post("/api/movies", d)
         clear_state(uid)
         if result and result.get("success"):
-            return await msg.reply(f"✅ Movie added! Total: **{result['count']}**")
+            pos = d.get("position", "bottom")
+            return await msg.reply(f"✅ Movie added to **{pos}**! Total: **{result['count']}**")
         return await msg.reply(f"❌ Failed: `{result}`")
 
     # ─── ADD SERIES ───
@@ -638,10 +636,11 @@ async def on_text(_, msg: Message):
             clear_state(uid)
             return await msg.reply("❌ Cancelled.")
         d = get_data(uid)
+        d["position"] = "top"          # series always go to top
         result = await api_post("/api/series", d)
         clear_state(uid)
         if result and result.get("success"):
-            return await msg.reply(f"✅ Series added! Total: **{result['count']}**")
+            return await msg.reply(f"✅ Series added to **top**! Total: **{result['count']}**")
         return await msg.reply(f"❌ Failed: `{result}`")
 
     # ─── ADD COLLECTION ───
@@ -668,11 +667,12 @@ async def on_text(_, msg: Message):
             "banner": d.get("col_banner", ""),
             "bg-music": "",
             "movies": movies_list,
+            # Collections API inserts new key at the end (bottom) by design
         }
         result = await api_post("/api/collections", payload)
         clear_state(uid)
         if result and result.get("success"):
-            return await msg.reply(f"✅ Collection created! Total: **{result['total']}**")
+            return await msg.reply(f"✅ Collection created at **bottom**! Total: **{result['total']}**")
         return await msg.reply(f"❌ Failed: `{result}`")
 
     # ─── DELETE ───
@@ -774,6 +774,26 @@ async def on_cb(_, cb: CallbackQuery):
             f"Current `{field}`: `{json.dumps(current)}`\n\nEnter new value (JSON for objects):"
         )
         return await cb.answer()
+
+    # Movie position selection (inline buttons after 1080p)
+    if data in ("pos_top", "pos_bottom"):
+        if get_state(uid) != S_ADD_MOVIE_POS:
+            return await cb.answer("Session expired. Please start again.", show_alert=True)
+        pos = "top" if data == "pos_top" else "bottom"
+        update_data(uid, position=pos)
+        d = get_data(uid)
+        set_state(uid, S_ADD_MOVIE_CONFIRM, **d)
+        await cb.answer(f"Position: {pos}")
+        await cb.message.edit(
+            f"✅ **Confirm Movie**\n\n"
+            f"ID: `{d.get('id','?')}`\n"
+            f"TMDB: `{d.get('tmdb_id','?')}`\n"
+            f"Extras: `{d.get('extras','')}`\n"
+            f"Position: `{pos}`\n"
+            f"Downloads: `{json.dumps(d.get('downloads', {}))}`\n\n"
+            f"Type **yes** to confirm or **no** to cancel:"
+        )
+        return
 
     # Menu buttons
     await cb.answer()
