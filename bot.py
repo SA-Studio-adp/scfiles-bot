@@ -71,6 +71,7 @@ S_ADD_SERIES_CONFIRM= "add_series_confirm"
 S_ADD_COL_ID        = "add_col_id"
 S_ADD_COL_NAME      = "add_col_name"
 S_ADD_COL_BANNER    = "add_col_banner"
+S_ADD_COL_BGMUSIC   = "add_col_bgmusic"
 S_ADD_COL_MOVIES    = "add_col_movies"
 S_DEL_MOVIE         = "del_movie"
 S_DEL_SERIES        = "del_series"
@@ -454,7 +455,11 @@ async def cmd_addcollection(_, msg: Message):
     if not is_admin(msg.from_user.id):
         return await msg.reply("⛔ Access denied.")
     set_state(msg.from_user.id, S_ADD_COL_ID)
-    await msg.reply("🗂 **Add Collection**\n\nEnter collection **ID** (slug, e.g. `marvel-mcu`):")
+    await msg.reply(
+        "🗂 **Add Collection**\n\n"
+        "Steps: ID → Name → Banner → BG Music → Movies (JSON)\n\n"
+        "Enter collection **ID** (slug, e.g. `vijay` or `marvel-mcu`):"
+    )
 
 # ═══════════════════════════════════════════════════
 #  DELETE commands
@@ -506,14 +511,19 @@ async def cmd_tmdb(_, msg: Message):
 
 # ═══════════════════════════════════════════════════
 #  UNIVERSAL TEXT HANDLER  (state machine)
+#  NOTE: We catch ALL private text here and skip if no state is set.
+#        Command handlers registered above take priority in Pyrogram,
+#        so commands will never reach this handler.
 # ═══════════════════════════════════════════════════
-@pyro.on_message(filters.text & filters.private & ~filters.command(["start","help","cancel",
-    "status","stats","movies","series","collections","addmovie","addseries","addcollection",
-    "editmovie","delmovie","delseries","delcollection","tmdb","backup","backupzip","setbackup"]))
+@pyro.on_message(filters.text & filters.private)
 async def on_text(_, msg: Message):
     uid   = msg.from_user.id
     state = get_state(uid)
     text  = msg.text.strip()
+
+    # Ignore commands (they are handled by dedicated handlers above)
+    if text.startswith("/"):
+        return
 
     if state is None:
         return  # ignore unsolicited text
@@ -573,15 +583,21 @@ async def on_text(_, msg: Message):
         return await msg.reply("📌 Where should this movie be added?", reply_markup=kb)
 
     if state == S_ADD_MOVIE_CONFIRM:
+        if text.lower() not in ("yes", "no"):
+            return await msg.reply("Please type **yes** to confirm or **no** to cancel.")
         if text.lower() != "yes":
             clear_state(uid)
             return await msg.reply("❌ Cancelled.")
         d = get_data(uid)
         d.setdefault("subtitles", {})
-        result = await api_post("/api/movies", d)
+        # Backend API accepts 'position' as top-level field for insertion order
+        # The stored JSON uses 'pos' field — send both so backend handles it
+        pos = d.get("pos", "bottom")
+        payload = {k: v for k, v in d.items()}   # copy
+        payload["position"] = pos                 # API param for top/bottom insertion
+        result = await api_post("/api/movies", payload)
         clear_state(uid)
         if result and result.get("success"):
-            pos = d.get("position", "bottom")
             return await msg.reply(f"✅ Movie added to **{pos}**! Total: **{result['count']}**")
         return await msg.reply(f"❌ Failed: `{result}`")
 
@@ -591,7 +607,7 @@ async def on_text(_, msg: Message):
             return await msg.reply("❌ Enter a valid numeric TMDB ID.")
         tid = int(text)
         info = await tmdb_tv(tid)
-        data = {"tmdb_id": str(tid), "seasons": []}
+        data = {"tmdb_id": str(tid), "seasons": []}   # tmdb_id is STRING in series.json
         if info:
             data["id"] = info.get("name", "").lower().replace(" ", "-").replace("'", "")
             p = poster(info)
@@ -617,17 +633,34 @@ async def on_text(_, msg: Message):
         try:
             seasons = json.loads(text)
             if not isinstance(seasons, list):
-                raise ValueError("Must be a list")
+                raise ValueError("Must be a JSON array")
+            # Validate structure
+            for s in seasons:
+                if "season_number" not in s or "episodes" not in s:
+                    raise ValueError("Each season needs 'season_number' and 'episodes'")
+                for ep in s["episodes"]:
+                    if "ep_number" not in ep or "links" not in ep:
+                        raise ValueError("Each episode needs 'ep_number' and 'links'")
+                    if "subtitle" not in ep:
+                        ep["subtitle"] = ""   # auto-add if missing
             update_data(uid, seasons=seasons)
         except Exception as e:
-            return await msg.reply(f"❌ Invalid JSON: {e}\n\nTry again:")
+            return await msg.reply(
+                f"❌ Invalid JSON: {e}\n\n"
+                f"Expected format:\n"
+                f"```json\n[{{\"season_number\":1,\"episodes\":["
+                f"{{\"ep_number\":1,\"links\":{{\"360p\":\"URL\",\"720p\":\"URL\"}},\"subtitle\":\"\"}}]}}]\n```"
+            )
         d = get_data(uid)
+        total_eps = sum(len(s.get("episodes",[])) for s in seasons)
         set_state(uid, S_ADD_SERIES_CONFIRM, **d)
         return await msg.reply(
             f"✅ **Confirm Series**\n\n"
             f"ID: `{d.get('id','?')}`\n"
-            f"TMDB: `{d.get('tmdb_id','?')}`\n"
-            f"Seasons: `{len(d['seasons'])}`\n\n"
+            f"TMDB ID: `{d.get('tmdb_id','?')}`\n"
+            f"Seasons: `{len(d['seasons'])}`\n"
+            f"Total episodes: `{total_eps}`\n"
+            f"Position: `top` _(always)_\n\n"
             f"Type **yes** to confirm or **no** to cancel:"
         )
 
@@ -655,24 +688,53 @@ async def on_text(_, msg: Message):
 
     if state == S_ADD_COL_BANNER:
         update_data(uid, col_banner="" if text == "-" else text)
+        set_state(uid, S_ADD_COL_BGMUSIC, **get_data(uid))
+        return await msg.reply("Enter **bg-music URL** (or `-` to skip):")
+
+    if state == S_ADD_COL_BGMUSIC:
+        update_data(uid, col_bgmusic="" if text == "-" else text)
         set_state(uid, S_ADD_COL_MOVIES, **get_data(uid))
-        return await msg.reply("Enter **movie IDs** (comma-separated, e.g. `aadu-3,youth`):")
+        return await msg.reply(
+            "📋 Paste **movies list** as JSON array.\n\n"
+            "Each movie needs: `id`, `tmdb_id`, `quality`, `download`\n\n"
+            "```json\n[\n"
+            "  {\n"
+            "    \"id\": \"movie-slug\",\n"
+            "    \"tmdb_id\": 12345,\n"
+            "    \"quality\": \"1080p\",\n"
+            "    \"download\": \"https://cdn-scfiles.vercel.app/dl/...\"\n"
+            "  }\n"
+            "]\n```"
+        )
 
     if state == S_ADD_COL_MOVIES:
+        try:
+            movies_list = json.loads(text)
+            if not isinstance(movies_list, list):
+                raise ValueError("Must be a JSON array")
+            for m in movies_list:
+                if not all(k in m for k in ("id", "tmdb_id", "quality", "download")):
+                    raise ValueError("Each movie needs: id, tmdb_id, quality, download")
+        except Exception as e:
+            return await msg.reply(
+                f"❌ Invalid JSON: {e}\n\n"
+                f"Each item must have: `id`, `tmdb_id`, `quality`, `download`"
+            )
         d = get_data(uid)
-        movies_list = [m.strip() for m in text.split(",") if m.strip()]
         payload = {
-            "id": d["col_id"],
-            "name": d["col_name"],
-            "banner": d.get("col_banner", ""),
-            "bg-music": "",
-            "movies": movies_list,
-            # Collections API inserts new key at the end (bottom) by design
+            "id":       d["col_id"],
+            "name":     d["col_name"],
+            "banner":   d.get("col_banner", ""),
+            "bg-music": d.get("col_bgmusic", ""),
+            "movies":   movies_list,
         }
         result = await api_post("/api/collections", payload)
         clear_state(uid)
         if result and result.get("success"):
-            return await msg.reply(f"✅ Collection created at **bottom**! Total: **{result['total']}**")
+            return await msg.reply(
+                f"✅ Collection **{d['col_name']}** created at **bottom**!\n"
+                f"Movies: **{len(movies_list)}** | Total collections: **{result['total']}**"
+            )
         return await msg.reply(f"❌ Failed: `{result}`")
 
     # ─── DELETE ───
@@ -780,17 +842,19 @@ async def on_cb(_, cb: CallbackQuery):
         if get_state(uid) != S_ADD_MOVIE_POS:
             return await cb.answer("Session expired. Please start again.", show_alert=True)
         pos = "top" if data == "pos_top" else "bottom"
-        update_data(uid, position=pos)
+        update_data(uid, pos=pos)          # ← real field name in JSON is "pos"
         d = get_data(uid)
         set_state(uid, S_ADD_MOVIE_CONFIRM, **d)
         await cb.answer(f"Position: {pos}")
+        dl_summary = ", ".join(f"{k}p" for k in sorted(d.get("downloads", {}).keys()))
         await cb.message.edit(
             f"✅ **Confirm Movie**\n\n"
             f"ID: `{d.get('id','?')}`\n"
-            f"TMDB: `{d.get('tmdb_id','?')}`\n"
-            f"Extras: `{d.get('extras','')}`\n"
+            f"TMDB ID: `{d.get('tmdb_id','?')}`\n"
+            f"Extras: `{d.get('extras','') or '—'}`\n"
             f"Position: `{pos}`\n"
-            f"Downloads: `{json.dumps(d.get('downloads', {}))}`\n\n"
+            f"Downloads: `{dl_summary or 'none'}`\n"
+            f"Subtitles: `{d.get('subtitles', {}) or 'none'}`\n\n"
             f"Type **yes** to confirm or **no** to cancel:"
         )
         return
@@ -1170,7 +1234,7 @@ async def main():
                 pass
 
     try:
-        await asyncio.get_event_loop().create_future()  # run forever
+        await asyncio.Event().wait()  # run forever
     finally:
         await pyro.stop()
         await runner.cleanup()
