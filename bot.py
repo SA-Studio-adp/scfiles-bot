@@ -1,7 +1,5 @@
 """
-SCFiles Backend Manager Bot
-A Telegram bot to manage the SCFiles backend server (movies, series, collections)
-with TMDB metadata, backup, and web service monitoring.
+SCFiles Backend Manager Bot — Pyrogram Edition
 """
 
 import os
@@ -12,6 +10,9 @@ import zipfile
 import aiohttp
 import pytz
 from datetime import datetime, timedelta
+
+import aiohttp
+from aiohttp import web
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiohttp import web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
@@ -108,109 +109,164 @@ def admin_only(func):
 
 async def api_get(path: str) -> dict | list | None:
     try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(f"{BACKEND_URL}{path}", timeout=aiohttp.ClientTimeout(total=15)) as r:
-                return await r.json()
+        s = await get_session()
+        async with s.get(f"{BACKEND_URL}{path}", timeout=aiohttp.ClientTimeout(total=15)) as r:
+            return await r.json()
     except Exception as e:
-        logger.error(f"API GET {path}: {e}")
+        logger.error("API GET %s: %s", path, e)
         return None
 
-async def api_post(path: str, data: dict) -> dict | None:
+async def api_post(path: str, data: dict):
     try:
-        async with aiohttp.ClientSession() as s:
-            async with s.post(f"{BACKEND_URL}{path}", json=data,
-                              timeout=aiohttp.ClientTimeout(total=15)) as r:
-                return await r.json()
+        s = await get_session()
+        async with s.post(f"{BACKEND_URL}{path}", json=data,
+                          timeout=aiohttp.ClientTimeout(total=15)) as r:
+            return await r.json()
     except Exception as e:
-        logger.error(f"API POST {path}: {e}")
+        logger.error("API POST %s: %s", path, e)
         return None
 
-async def api_delete(path: str) -> dict | None:
+async def api_delete(path: str):
     try:
-        async with aiohttp.ClientSession() as s:
-            async with s.delete(f"{BACKEND_URL}{path}",
-                                timeout=aiohttp.ClientTimeout(total=15)) as r:
-                return await r.json()
+        s = await get_session()
+        async with s.delete(f"{BACKEND_URL}{path}",
+                            timeout=aiohttp.ClientTimeout(total=15)) as r:
+            return await r.json()
     except Exception as e:
-        logger.error(f"API DELETE {path}: {e}")
+        logger.error("API DELETE %s: %s", path, e)
         return None
 
-async def tmdb_movie(tmdb_id: int) -> dict | None:
+# ─────────────── TMDB helpers ───────────────
+async def tmdb_movie(tid: int) -> dict | None:
     try:
-        async with aiohttp.ClientSession() as s:
-            url = f"{TMDB_BASE}/movie/{tmdb_id}?api_key={TMDB_API_KEY}&language=en-US"
-            async with s.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
-                if r.status == 200:
-                    return await r.json()
+        s = await get_session()
+        async with s.get(
+            f"{TMDB_BASE}/movie/{tid}?api_key={TMDB_API_KEY}&language=en-US",
+            timeout=aiohttp.ClientTimeout(total=10)
+        ) as r:
+            return await r.json() if r.status == 200 else None
     except Exception as e:
-        logger.error(f"TMDB movie {tmdb_id}: {e}")
-    return None
+        logger.error("TMDB movie %s: %s", tid, e)
+        return None
 
-async def tmdb_tv(tmdb_id: int) -> dict | None:
+async def tmdb_tv(tid: int) -> dict | None:
     try:
-        async with aiohttp.ClientSession() as s:
-            url = f"{TMDB_BASE}/tv/{tmdb_id}?api_key={TMDB_API_KEY}&language=en-US"
-            async with s.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
-                if r.status == 200:
-                    return await r.json()
+        s = await get_session()
+        async with s.get(
+            f"{TMDB_BASE}/tv/{tid}?api_key={TMDB_API_KEY}&language=en-US",
+            timeout=aiohttp.ClientTimeout(total=10)
+        ) as r:
+            return await r.json() if r.status == 200 else None
     except Exception as e:
-        logger.error(f"TMDB tv {tmdb_id}: {e}")
-    return None
+        logger.error("TMDB tv %s: %s", tid, e)
+        return None
 
-async def tmdb_search(query: str, media_type="movie") -> list:
+async def tmdb_search(query: str, media_type: str = "movie") -> list:
     try:
-        async with aiohttp.ClientSession() as s:
-            url = f"{TMDB_BASE}/search/{media_type}?api_key={TMDB_API_KEY}&query={query}&language=en-US"
-            async with s.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
-                if r.status == 200:
-                    data = await r.json()
-                    return data.get("results", [])[:5]
+        s = await get_session()
+        async with s.get(
+            f"{TMDB_BASE}/search/{media_type}?api_key={TMDB_API_KEY}&query={query}&language=en-US",
+            timeout=aiohttp.ClientTimeout(total=10)
+        ) as r:
+            if r.status == 200:
+                return (await r.json()).get("results", [])[:5]
     except Exception as e:
-        logger.error(f"TMDB search: {e}")
+        logger.error("TMDB search: %s", e)
     return []
 
-def fmt_tmdb_movie(m: dict) -> str:
-    title    = m.get("title", "N/A")
-    year     = (m.get("release_date") or "")[:4]
-    rating   = m.get("vote_average", 0)
-    overview = (m.get("overview") or "No overview.")[:300]
-    genres   = ", ".join(g["name"] for g in m.get("genres", []))
-    runtime  = m.get("runtime", 0)
+def fmt_movie(m: dict) -> str:
+    title   = m.get("title", "N/A")
+    year    = (m.get("release_date") or "")[:4]
+    rating  = m.get("vote_average", 0)
+    runtime = m.get("runtime", 0)
+    genres  = ", ".join(g["name"] for g in m.get("genres", []))
+    ov      = (m.get("overview") or "No overview.")[:300]
     return (
-        f"🎬 *{title}* ({year})\n"
+        f"🎬 **{title}** ({year})\n"
         f"⭐ {rating:.1f}/10  •  ⏱ {runtime} min\n"
         f"🎭 {genres or 'N/A'}\n\n"
-        f"📝 {overview}"
+        f"📝 {ov}"
     )
 
-def fmt_tmdb_tv(t: dict) -> str:
-    name     = t.get("name", "N/A")
-    year     = (t.get("first_air_date") or "")[:4]
-    rating   = t.get("vote_average", 0)
-    overview = (t.get("overview") or "No overview.")[:300]
-    seasons  = t.get("number_of_seasons", "?")
-    episodes = t.get("number_of_episodes", "?")
-    genres   = ", ".join(g["name"] for g in t.get("genres", []))
+def fmt_tv(t: dict) -> str:
+    name    = t.get("name", "N/A")
+    year    = (t.get("first_air_date") or "")[:4]
+    rating  = t.get("vote_average", 0)
+    seasons = t.get("number_of_seasons", "?")
+    eps     = t.get("number_of_episodes", "?")
+    genres  = ", ".join(g["name"] for g in t.get("genres", []))
+    ov      = (t.get("overview") or "No overview.")[:300]
     return (
-        f"📺 *{name}* ({year})\n"
-        f"⭐ {rating:.1f}/10  •  {seasons} seasons / {episodes} eps\n"
+        f"📺 **{name}** ({year})\n"
+        f"⭐ {rating:.1f}/10  •  {seasons} seasons / {eps} eps\n"
         f"🎭 {genres or 'N/A'}\n\n"
-        f"📝 {overview}"
+        f"📝 {ov}"
     )
 
-def poster_url(path: str | None) -> str | None:
-    if path:
-        return f"{TMDB_IMG}{path}"
-    return None
+def poster_url(info: dict) -> str | None:
+    p = info.get("poster_path")
+    return f"{TMDB_IMG}{p}" if p else None
 
-# ──────────────────────────── /start /help ────────────────────────────
-async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    kb = [
-        [InlineKeyboardButton("🎬 Movies", callback_data="menu_movies"),
-         InlineKeyboardButton("📺 Series", callback_data="menu_series")],
-        [InlineKeyboardButton("🗂 Collections", callback_data="menu_collections"),
-         InlineKeyboardButton("🔍 TMDB Search", callback_data="menu_tmdb")],
-        [InlineKeyboardButton("📊 Stats", callback_data="menu_stats"),
+# ─────────────── Backup helpers ───────────────
+async def _collect_payloads() -> dict[str, bytes]:
+    result = {}
+    for fname, path in [
+        ("movies.json",      "/api/movies"),
+        ("series.json",      "/api/series"),
+        ("collections.json", "/api/collections"),
+    ]:
+        data = await api_get(path)
+        if data is None:
+            raise RuntimeError(f"Could not fetch {path}")
+        result[fname] = json.dumps(data, indent=2, ensure_ascii=False).encode()
+    return result
+
+async def create_zip() -> tuple[bytes, str]:
+    payloads = await _collect_payloads()
+    ts  = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, data in payloads.items():
+            zf.writestr(f"{ts}_{name}", data)
+    buf.seek(0)
+    return buf.read(), ts
+
+async def perform_backup(bot: Client, target: str | int | None = None) -> tuple[bool, str]:
+    global LAST_BACKUP_AT
+    dest = str(target or BACKUP_TARGET).strip()
+    if not dest:
+        return False, "No backup chat configured. Use /setbackup <chat_id>"
+    ts = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    try:
+        await bot.send_message(int(dest), f"💾 **Auto-Backup** — {ts}")
+        for fname, data in (await _collect_payloads()).items():
+            buf = io.BytesIO(data)
+            buf.name = f"{ts}_{fname}"
+            await bot.send_document(int(dest), buf, caption=f"`{ts}_{fname}`")
+        LAST_BACKUP_AT = datetime.now()
+        logger.info("Backup done → %s", dest)
+        return True, dest
+    except Exception as e:
+        logger.error("Backup failed → %s: %s", dest, e)
+        return False, str(e)
+
+# ─────────────── Pyrogram client ───────────────
+# in_memory=True: no session file — avoids file-lock / permission issues on deployment
+pyro = Client(
+    "scfiles_bot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN,
+    in_memory=True,
+)
+
+def main_menu_kb() -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton("🎬 Movies",       callback_data="menu_movies"),
+         InlineKeyboardButton("📺 Series",        callback_data="menu_series")],
+        [InlineKeyboardButton("🗂 Collections",   callback_data="menu_cols"),
+         InlineKeyboardButton("🔍 TMDB Search",   callback_data="menu_tmdb")],
+        [InlineKeyboardButton("📊 Stats",         callback_data="menu_stats"),
          InlineKeyboardButton("🌐 Server Status", callback_data="menu_status")],
         [InlineKeyboardButton("💾 Backup Now", callback_data="menu_backup"),
          InlineKeyboardButton("📥 Backup All ZIP", callback_data="menu_backup_all")],
@@ -266,7 +322,7 @@ async def check_status(update_or_query, is_query=False):
     uptime = now - BOT_STARTED_AT
     bot_health = "🟢 Online"
     try:
-        start = datetime.now()
+        start = now
         async with aiohttp.ClientSession() as s:
             async with s.get(BACKEND_URL, timeout=aiohttp.ClientTimeout(total=10)) as r:
                 elapsed = (datetime.now() - start).total_seconds() * 1000
@@ -312,42 +368,43 @@ async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
-# ──────────────────────────── LIST MOVIES ────────────────────────────
-async def cmd_movies(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    movies = await api_get("/api/movies?limit=10") or []
-    if not movies:
-        await update.message.reply_text("No movies found.")
-        return
-    lines = []
-    for m in movies[:10]:
-        mid  = m.get("id", "?")
-        extra = m.get("extras", "")
-        tid  = m.get("tmdb_id", "")
-        lines.append(f"• `{mid}` | TMDB: `{tid}` | {extra}")
-    await update.message.reply_text(
-        f"🎬 *Recent Movies (top 10)*\n\n" + "\n".join(lines),
-        parse_mode=ParseMode.MARKDOWN
+@pyro.on_message(filters.command("stats") & filters.private)
+async def cmd_stats(_, msg: Message):
+    movies = await api_get("/api/movies") or []
+    series = await api_get("/api/series") or []
+    cols   = await api_get("/api/collections") or {}
+    await msg.reply(
+        f"📊 **Database Stats**\n\n"
+        f"🎬 Movies: **{len(movies)}**\n"
+        f"📺 Series: **{len(series)}**\n"
+        f"🗂 Collections: **{len(cols)}**\n\n"
+        f"🕐 `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`"
     )
 
-# ──────────────────────────── LIST SERIES ────────────────────────────
-async def cmd_series(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    series = await api_get("/api/series?limit=10") or []
-    if not series:
-        await update.message.reply_text("No series found.")
-        return
-    lines = []
-    for s in series[:10]:
-        sid   = s.get("id", "?")
-        tid   = s.get("tmdb_id", "")
-        seasons = len(s.get("seasons", []))
-        lines.append(f"• `{sid}` | TMDB: `{tid}` | {seasons} season(s)")
-    await update.message.reply_text(
-        f"📺 *Recent Series (top 10)*\n\n" + "\n".join(lines),
-        parse_mode=ParseMode.MARKDOWN
-    )
+@pyro.on_message(filters.command("movies") & filters.private)
+async def cmd_movies(_, msg: Message):
+    items = await api_get("/api/movies?limit=15") or []
+    if not items:
+        return await msg.reply("No movies found.")
+    lines = [
+        f"• `{m.get('id','?')}` | TMDB `{m.get('tmdb_id','?')}` | {m.get('extras','') or '—'}"
+        for m in items[:15]
+    ]
+    await msg.reply("🎬 **Recent Movies**\n\n" + "\n".join(lines))
 
-# ──────────────────────────── LIST COLLECTIONS ────────────────────────────
-async def cmd_collections(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+@pyro.on_message(filters.command("series") & filters.private)
+async def cmd_series_list(_, msg: Message):
+    items = await api_get("/api/series?limit=15") or []
+    if not items:
+        return await msg.reply("No series found.")
+    lines = [
+        f"• `{s.get('id','?')}` | TMDB `{s.get('tmdb_id','?')}` | {len(s.get('seasons',[]))} season(s)"
+        for s in items[:15]
+    ]
+    await msg.reply("📺 **Recent Series**\n\n" + "\n".join(lines))
+
+@pyro.on_message(filters.command("collections") & filters.private)
+async def cmd_collections(_, msg: Message):
     cols = await api_get("/api/collections") or {}
     if not cols:
         await update.message.reply_text("No collections found.")
@@ -477,210 +534,152 @@ async def addseries_tmdb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ TMDB not found. Paste episode JSON:")
     return ADD_SERIES_EPISODES
 
-async def addseries_episodes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    raw = update.message.text.strip()
+@pyro.on_message(filters.command("backupzip") & filters.private)
+async def cmd_backupzip(_, msg: Message):
+    if not is_admin(msg.from_user.id):
+        return await msg.reply("⛔ Access denied.")
+    m = await msg.reply("📦 Building ZIP…")
     try:
-        seasons = json.loads(raw)
-        if not isinstance(seasons, list):
-            raise ValueError("Must be a list")
-        ctx.user_data["new_series"]["seasons"] = seasons
+        data, ts = await create_zip()
+        buf = io.BytesIO(data)
+        buf.name = f"backup_all_{ts}.zip"
+        await msg.reply_document(buf, caption=f"✅ Backup ZIP `{ts}`")
+        await m.delete()
     except Exception as e:
-        await update.message.reply_text(f"❌ Invalid JSON: {e}\n\nTry again:")
-        return ADD_SERIES_EPISODES
-    s = ctx.user_data["new_series"]
-    summary = (
-        f"✅ *Confirm Series*\n\n"
-        f"ID: `{s.get('id','?')}`\n"
-        f"TMDB: `{s.get('tmdb_id','?')}`\n"
-        f"Seasons: `{len(s['seasons'])}`\n\n"
-        f"Type *yes* to confirm or *no* to cancel:"
+        await m.edit_text(f"❌ ZIP failed:\n`{e}`")
+
+@pyro.on_message(filters.command("setbackup") & filters.private)
+async def cmd_setbackup(_, msg: Message):
+    global BACKUP_TARGET
+    if not is_admin(msg.from_user.id):
+        return await msg.reply("⛔ Access denied.")
+    parts = msg.text.split(maxsplit=1)
+    if len(parts) < 2:
+        return await msg.reply(
+            f"📦 Current backup chat: `{BACKUP_TARGET or 'Not set'}`\n\n"
+            f"Usage: `/setbackup <chat_id>`"
+        )
+    BACKUP_TARGET = parts[1].strip()
+    save_backup_target(BACKUP_TARGET)
+    await msg.reply(f"✅ Backup chat set to `{BACKUP_TARGET}`.")
+
+# ── Conversation starters ────────────────────────────────────
+
+@pyro.on_message(filters.command("addmovie") & filters.private)
+async def cmd_addmovie(_, msg: Message):
+    if not is_admin(msg.from_user.id):
+        return await msg.reply("⛔ Access denied.")
+    set_state(msg.from_user.id, S_ADD_MOVIE_TMDB)
+    await msg.reply("🎬 **Add Movie**\n\nEnter the **TMDB Movie ID**:")
+
+@pyro.on_message(filters.command("addseries") & filters.private)
+async def cmd_addseries(_, msg: Message):
+    if not is_admin(msg.from_user.id):
+        return await msg.reply("⛔ Access denied.")
+    set_state(msg.from_user.id, S_ADD_SERIES_TMDB)
+    await msg.reply("📺 **Add Series**\n\nEnter the **TMDB TV Show ID**:")
+
+@pyro.on_message(filters.command("addcollection") & filters.private)
+async def cmd_addcollection(_, msg: Message):
+    if not is_admin(msg.from_user.id):
+        return await msg.reply("⛔ Access denied.")
+    set_state(msg.from_user.id, S_ADD_COL_ID)
+    await msg.reply(
+        "🗂 **Add Collection**\n\n"
+        "Steps: ID → Name → Banner → BG Music → Movies JSON\n\n"
+        "Enter collection **ID** (slug, e.g. `vijay`):"
     )
-    await update.message.reply_text(summary, parse_mode=ParseMode.MARKDOWN)
-    return ADD_SERIES_CONFIRM
 
-async def addseries_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if update.message.text.strip().lower() != "yes":
-        await update.message.reply_text("❌ Cancelled.")
-        ctx.user_data.clear()
-        return ConversationHandler.END
-    series = ctx.user_data.pop("new_series", {})
-    result = await api_post("/api/series", series)
-    if result and result.get("success"):
-        await update.message.reply_text(f"✅ Series added! Total: *{result['count']}*", parse_mode=ParseMode.MARKDOWN)
-    else:
-        await update.message.reply_text(f"❌ Failed.\n`{result}`", parse_mode=ParseMode.MARKDOWN)
-    return ConversationHandler.END
+@pyro.on_message(filters.command("delmovie") & filters.private)
+async def cmd_delmovie(_, msg: Message):
+    if not is_admin(msg.from_user.id):
+        return await msg.reply("⛔ Access denied.")
+    set_state(msg.from_user.id, S_DEL_MOVIE)
+    await msg.reply("🗑 Enter the **movie ID** to delete:")
 
-# ──────────────────────────── ADD COLLECTION ────────────────────────────
-@admin_only
-async def cmd_addcollection(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🗂 *Add Collection*\n\nEnter collection *ID* (slug, e.g. `marvel-mcu`):", parse_mode=ParseMode.MARKDOWN)
-    return ADD_COL_ID
+@pyro.on_message(filters.command("delseries") & filters.private)
+async def cmd_delseries(_, msg: Message):
+    if not is_admin(msg.from_user.id):
+        return await msg.reply("⛔ Access denied.")
+    set_state(msg.from_user.id, S_DEL_SERIES)
+    await msg.reply("🗑 Enter the **series ID** to delete:")
 
-async def addcol_id(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    ctx.user_data["new_col"] = {"id": update.message.text.strip()}
-    await update.message.reply_text("Enter collection *Name*:", parse_mode=ParseMode.MARKDOWN)
-    return ADD_COL_NAME
+@pyro.on_message(filters.command("delcollection") & filters.private)
+async def cmd_delcollection(_, msg: Message):
+    if not is_admin(msg.from_user.id):
+        return await msg.reply("⛔ Access denied.")
+    set_state(msg.from_user.id, S_DEL_COL)
+    await msg.reply("🗑 Enter the **collection ID** to delete:")
 
-async def addcol_name(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    ctx.user_data["new_col"]["name"] = update.message.text.strip()
-    await update.message.reply_text("Enter *banner URL* (or `-` to skip):", parse_mode=ParseMode.MARKDOWN)
-    return ADD_COL_BANNER
+@pyro.on_message(filters.command("editmovie") & filters.private)
+async def cmd_editmovie(_, msg: Message):
+    if not is_admin(msg.from_user.id):
+        return await msg.reply("⛔ Access denied.")
+    set_state(msg.from_user.id, S_EDIT_MOVIE_ID)
+    await msg.reply("✏️ Enter the **movie ID** to edit:")
 
-async def addcol_banner(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    val = update.message.text.strip()
-    ctx.user_data["new_col"]["banner"] = "" if val == "-" else val
-    await update.message.reply_text("Enter *movie IDs* (comma-separated, e.g. `aadu-3,youth`):", parse_mode=ParseMode.MARKDOWN)
-    return ADD_COL_CONFIRM
+@pyro.on_message(filters.command("tmdb") & filters.private)
+async def cmd_tmdb(_, msg: Message):
+    if not is_admin(msg.from_user.id):
+        return await msg.reply("⛔ Access denied.")
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🎬 Movie",   callback_data="tmdb_movie"),
+        InlineKeyboardButton("📺 TV Show", callback_data="tmdb_tv"),
+    ]])
+    set_state(msg.from_user.id, S_TMDB_QUERY, tmdb_type="movie")
+    await msg.reply("🔍 **TMDB Search** — What type?", reply_markup=kb)
 
-async def addcol_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    movies = [m.strip() for m in update.message.text.split(",") if m.strip()]
-    col = ctx.user_data.pop("new_col", {})
-    payload = {
-        "id": col["id"],
-        "name": col["name"],
-        "banner": col.get("banner", ""),
-        "bg-music": "",
-        "movies": movies,
-    }
-    result = await api_post("/api/collections", payload)
-    if result and result.get("success"):
-        await update.message.reply_text(f"✅ Collection created! Total: *{result['total']}*", parse_mode=ParseMode.MARKDOWN)
-    else:
-        await update.message.reply_text(f"❌ Failed.\n`{result}`", parse_mode=ParseMode.MARKDOWN)
-    return ConversationHandler.END
+# ═══════════════════════════════════════
+#  UNIVERSAL TEXT HANDLER (state machine)
+# ═══════════════════════════════════════
+@pyro.on_message(filters.text & filters.private)
+async def on_text(_, msg: Message):
+    # Guard: from_user can be None for channel posts
+    if not msg.from_user:
+        return
 
-# ──────────────────────────── DELETE ────────────────────────────
-@admin_only
-async def cmd_delmovie(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🗑 Enter the *movie ID* to delete:", parse_mode=ParseMode.MARKDOWN)
-    return DEL_MOVIE_ID
+    uid  = msg.from_user.id
+    text = (msg.text or "").strip()
 
-async def delmovie_id(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    mid = update.message.text.strip()
-    result = await api_delete(f"/api/movies/{mid}")
-    if result and result.get("success"):
-        await update.message.reply_text(f"✅ Movie `{mid}` deleted. Remaining: *{result['count']}*", parse_mode=ParseMode.MARKDOWN)
-    else:
-        await update.message.reply_text(f"❌ {result or 'Failed'}", parse_mode=ParseMode.MARKDOWN)
-    return ConversationHandler.END
+    # Commands are already handled above; Pyrogram gives them priority
+    if text.startswith("/"):
+        return
 
-@admin_only
-async def cmd_delseries(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🗑 Enter the *series ID* to delete:", parse_mode=ParseMode.MARKDOWN)
-    return DEL_SERIES_ID
+    state = get_state(uid)
+    if state is None:
+        return
 
-async def delseries_id(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    sid = update.message.text.strip()
-    result = await api_delete(f"/api/series/{sid}")
-    if result and result.get("success"):
-        await update.message.reply_text(f"✅ Series `{sid}` deleted. Remaining: *{result['count']}*", parse_mode=ParseMode.MARKDOWN)
-    else:
-        await update.message.reply_text(f"❌ {result or 'Failed'}", parse_mode=ParseMode.MARKDOWN)
-    return ConversationHandler.END
+    logger.info("State [%s] uid=%s text=%r", state, uid, text[:60])
 
-@admin_only
-async def cmd_delcollection(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🗑 Enter the *collection ID* to delete:", parse_mode=ParseMode.MARKDOWN)
-    return DEL_COL_ID
-
-async def delcol_id(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    cid = update.message.text.strip()
-    result = await api_delete(f"/api/collections/{cid}")
-    if result and result.get("success"):
-        await update.message.reply_text(f"✅ Collection `{cid}` deleted. Total: *{result['total']}*", parse_mode=ParseMode.MARKDOWN)
-    else:
-        await update.message.reply_text(f"❌ {result or 'Failed'}", parse_mode=ParseMode.MARKDOWN)
-    return ConversationHandler.END
-
-# ──────────────────────────── EDIT MOVIE ────────────────────────────
-@admin_only
-async def cmd_editmovie(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✏️ Enter the *movie ID* to edit:", parse_mode=ParseMode.MARKDOWN)
-    return EDIT_MOVIE_ID
-
-async def editmovie_id(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    mid = update.message.text.strip()
-    movies = await api_get("/api/movies") or []
-    movie = next((m for m in movies if m["id"] == mid), None)
-    if not movie:
-        await update.message.reply_text("❌ Movie not found.")
-        return EDIT_MOVIE_ID
-    ctx.user_data["edit_movie"] = movie.copy()
-    fields = ["extras", "downloads", "subtitles", "tmdb_id", "id"]
-    kb = [[InlineKeyboardButton(f, callback_data=f"editfield_{f}")] for f in fields]
-    await update.message.reply_text(
-        f"🎬 Found: `{mid}`\n\nChoose field to edit:",
-        reply_markup=InlineKeyboardMarkup(kb),
-        parse_mode=ParseMode.MARKDOWN
-    )
-    return EDIT_FIELD
-
-async def editmovie_field_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    field = update.callback_query.data.replace("editfield_", "")
-    ctx.user_data["edit_field"] = field
-    current = ctx.user_data["edit_movie"].get(field, "")
-    await update.callback_query.edit_message_text(
-        f"Current `{field}`: `{json.dumps(current)}`\n\nEnter new value (JSON for objects):",
-        parse_mode=ParseMode.MARKDOWN
-    )
-    return EDIT_VALUE
-
-async def editmovie_value(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    raw   = update.message.text.strip()
-    field = ctx.user_data.get("edit_field")
-    movie = ctx.user_data.get("edit_movie", {})
     try:
-        val = json.loads(raw)
-    except Exception:
-        val = raw
-    movie[field] = val
-    result = await api_post("/api/movies", movie)
-    if result and result.get("success"):
-        await update.message.reply_text(f"✅ Movie updated!", parse_mode=ParseMode.MARKDOWN)
-    else:
-        await update.message.reply_text(f"❌ Failed.\n`{result}`", parse_mode=ParseMode.MARKDOWN)
-    ctx.user_data.clear()
-    return ConversationHandler.END
+        await _dispatch(msg, uid, state, text)
+    except Exception as e:
+        logger.exception("State handler [%s] crashed: %s", state, e)
+        await msg.reply(f"⚠️ Error: `{e}`\n\nUse /cancel to reset.")
 
-# ──────────────────────────── TMDB SEARCH ────────────────────────────
-@admin_only
-async def cmd_tmdb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    kb = [
-        [InlineKeyboardButton("🎬 Movie", callback_data="tmdb_movie"),
-         InlineKeyboardButton("📺 TV Show", callback_data="tmdb_tv")]
-    ]
-    await update.message.reply_text(
-        "🔍 *TMDB Search*\n\nWhat do you want to search?",
-        reply_markup=InlineKeyboardMarkup(kb),
-        parse_mode=ParseMode.MARKDOWN
-    )
-    return SEARCH_TYPE
 
-async def tmdb_type_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    ctx.user_data["tmdb_type"] = update.callback_query.data.replace("tmdb_", "")
-    await update.callback_query.edit_message_text("🔍 Enter your search query:")
-    return SEARCH_TMDB_Q
+async def _dispatch(msg: Message, uid: int, state: str, text: str):
+    d = get_data(uid)   # current conversation data (mutable dict reference)
 
-async def tmdb_query(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    q    = update.message.text.strip()
-    mtype = ctx.user_data.get("tmdb_type", "movie")
-    results = await tmdb_search(q, mtype)
-    if not results:
-        await update.message.reply_text("❌ No results found.")
-        return ConversationHandler.END
-    for r in results[:3]:
-        if mtype == "movie":
-            full = await tmdb_movie(r["id"])
-            if full:
-                msg    = fmt_tmdb_movie(full) + f"\n\n🆔 TMDB ID: `{full['id']}`"
-                poster = poster_url(full.get("poster_path"))
-                if poster:
-                    await update.message.reply_photo(poster, caption=msg, parse_mode=ParseMode.MARKDOWN)
-                else:
-                    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+    # ── ADD MOVIE ──────────────────────────────────────────────────────
+    if state == S_ADD_MOVIE_TMDB:
+        if not text.isdigit():
+            return await msg.reply("❌ Enter a valid numeric TMDB ID.")
+        tid  = int(text)
+        info = await tmdb_movie(tid)
+        mdata = {"tmdb_id": tid, "downloads": {}, "subtitles": {}}
+        if info:
+            mdata["id"] = (info.get("title") or "").lower().replace(" ", "-").replace("'", "")
+            p       = poster_url(info)
+            caption = (
+                fmt_movie(info)
+                + f"\n\nSuggested ID: `{mdata['id']}`"
+                + "\n\nEnter **extras** (e.g. `PreDVD - Tamil Audio`) or `-` to skip:"
+            )
+            if p:
+                await msg.reply_photo(p, caption=caption)
+            else:
+                await msg.reply(caption)
         else:
             full = await tmdb_tv(r["id"])
             if full:
@@ -930,7 +929,7 @@ async def web_logs_handler(request: web.Request) -> web.StreamResponse:
         },
     )
 
-async def cmd_backup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def cmd_backupall(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ Access denied.")
         return
@@ -991,22 +990,113 @@ async def cmd_logs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         caption=f"📋 Last {max(1, len(tail)//1024)}KB logs",
     )
 
-# ──────────────────────────── CALLBACK ROUTER ────────────────────────────
-async def menu_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    data = q.data
+async def cmd_backupall(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ Access denied.")
+        return
+    await update.message.reply_text("📦 Preparing backup ZIP…")
+    try:
+        zip_bytes, ts = await create_backup_zip_bytes()
+        await update.message.reply_document(
+            document=zip_bytes,
+            filename=f"backup_all_{ts}.zip",
+            caption="✅ Backup ZIP ready.",
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Failed to build ZIP backup.\n`{e}`", parse_mode=ParseMode.MARKDOWN)
+
+@admin_only
+async def cmd_setbackup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    global BACKUP_CHAT_TARGET
+    if not ctx.args:
+        current = BACKUP_CHAT_TARGET or "Not configured"
+        await update.message.reply_text(
+            f"📦 Current backup chat: `{current}`\n\nUsage:\n`/setbackup <chat_id>`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+    chat_id = ctx.args[0].strip()
+    BACKUP_CHAT_TARGET = chat_id
+    save_backup_chat_target(chat_id)
+    await update.message.reply_text(
+        f"✅ Backup chat updated to `{chat_id}`.\nAll auto/manual backups will use this chat.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+@admin_only
+async def cmd_logs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    tail = read_log_tail()
+    if not tail:
+        await update.message.reply_text("📭 No logs available yet.")
+        return
+    ts = now_ist().strftime("%Y-%m-%d_%H-%M-%S")
+    await update.message.reply_document(
+        document=tail,
+        filename=f"bot_logs_{ts}.txt",
+        caption=f"📋 Last {max(1, len(tail)//1024)}KB logs",
+    )
+
+@admin_only
+async def cmd_setbackup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    global BACKUP_CHAT_TARGET
+    if not ctx.args:
+        current = BACKUP_CHAT_TARGET or "Not configured"
+        await update.message.reply_text(
+            f"📦 Current backup chat: `{current}`\n\nUsage:\n`/setbackup <chat_id>`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+    chat_id = ctx.args[0].strip()
+    BACKUP_CHAT_TARGET = chat_id
+    save_backup_chat_target(chat_id)
+    await update.message.reply_text(
+        f"✅ Backup chat updated to `{chat_id}`.\nAll auto/manual backups will use this chat.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+@admin_only
+async def cmd_logs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    tail = read_log_tail()
+    if not tail:
+        await update.message.reply_text("📭 No logs available yet.")
+        return
+    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    await update.message.reply_document(
+        document=tail,
+        filename=f"bot_logs_{ts}.txt",
+        caption=f"📋 Last {max(1, len(tail)//1024)}KB logs",
+    )
+
+    # ── Menu buttons ──
+    await cb.answer()
 
     if data == "menu_status":
-        await check_status(q, is_query=True)
+        now    = datetime.now()
+        uptime = str(now - BOT_STARTED_AT).split(".")[0]
+        try:
+            s = await get_session()
+            t0 = datetime.now()
+            async with s.get(BACKEND_URL, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                ms   = (datetime.now() - t0).total_seconds() * 1000
+                ic   = "🟢" if r.status == 200 else "🟡"
+                body = (await r.text())[:60]
+            txt = (f"🤖 Bot: 🟢  |  ⏱ `{uptime}`\n"
+                   f"🖥 Backend: {ic}  ⚡ `{ms:.0f}ms`\n`{BACKEND_URL}`\n📨 `{body}`")
+        except Exception as e:
+            txt = f"🤖 Bot: 🟢  |  ⏱ `{uptime}`\n🖥 Backend: 🔴\n❗ `{e}`"
+        await cb.message.edit_text(txt)
+
     elif data == "menu_stats":
-        movies      = await api_get("/api/movies") or []
-        series      = await api_get("/api/series") or []
-        collections = await api_get("/api/collections") or {}
-        await q.edit_message_text(
-            f"📊 *Stats*\n\n🎬 Movies: *{len(movies)}*\n📺 Series: *{len(series)}*\n🗂 Collections: *{len(collections)}*",
-            parse_mode=ParseMode.MARKDOWN
+        movies = await api_get("/api/movies") or []
+        series = await api_get("/api/series") or []
+        cols   = await api_get("/api/collections") or {}
+        await cb.message.edit_text(
+            f"📊 **Stats**\n\n"
+            f"🎬 Movies: **{len(movies)}**\n"
+            f"📺 Series: **{len(series)}**\n"
+            f"🗂 Collections: **{len(cols)}**"
         )
+
     elif data == "menu_backup":
         await q.edit_message_text("💾 Running backup…")
         success, info = await perform_backup(ctx.application, target_chat_id=BACKUP_CHAT_TARGET or str(q.message.chat_id))
@@ -1027,17 +1117,20 @@ async def menu_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await q.edit_message_text(f"❌ Could not build backup ZIP: {e}")
     elif data == "menu_movies":
-        movies = await api_get("/api/movies?limit=10") or []
-        lines  = [f"• `{m['id']}` | TMDB `{m.get('tmdb_id','?')}`" for m in movies[:10]]
-        await q.edit_message_text("🎬 *Recent Movies*\n\n" + "\n".join(lines) or "None", parse_mode=ParseMode.MARKDOWN)
+        items = await api_get("/api/movies?limit=10") or []
+        lines = [f"• `{m.get('id','?')}` | `{m.get('tmdb_id','?')}`" for m in items[:10]]
+        await cb.message.edit_text("🎬 **Recent Movies**\n\n" + ("\n".join(lines) or "None"))
+
     elif data == "menu_series":
-        series = await api_get("/api/series?limit=10") or []
-        lines  = [f"• `{s['id']}` | {len(s.get('seasons',[]))} season(s)" for s in series[:10]]
-        await q.edit_message_text("📺 *Recent Series*\n\n" + "\n".join(lines) or "None", parse_mode=ParseMode.MARKDOWN)
-    elif data == "menu_collections":
+        items = await api_get("/api/series?limit=10") or []
+        lines = [f"• `{s.get('id','?')}` | {len(s.get('seasons',[]))} season(s)" for s in items[:10]]
+        await cb.message.edit_text("📺 **Recent Series**\n\n" + ("\n".join(lines) or "None"))
+
+    elif data == "menu_cols":
         cols  = await api_get("/api/collections") or {}
         lines = [f"• `{k}` — {v.get('name','?')}" for k, v in list(cols.items())[:10]]
-        await q.edit_message_text("🗂 *Collections*\n\n" + "\n".join(lines) or "None", parse_mode=ParseMode.MARKDOWN)
+        await cb.message.edit_text("🗂 **Collections**\n\n" + ("\n".join(lines) or "None"))
+
     elif data == "menu_tmdb":
         await q.edit_message_text("Use /tmdb command to search TMDB.")
 
@@ -1058,6 +1151,7 @@ async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE):
 # ──────────────────────────── MAIN ────────────────────────────
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
+    web_runner = None
 
     # Add movie conv
     app.add_handler(ConversationHandler(
@@ -1169,10 +1263,23 @@ def main():
         next_run_time=now_ist() + timedelta(seconds=30),
     )
 
-    # Remove the "first run shortly after start" in production:
-    # scheduler.add_job(perform_backup, trigger="interval", days=2, args=[app])
 
-    app.job_queue  # ensure job queue is ready
+# ═══════════════════════════════════════
+#  WEB DASHBOARD
+# ═══════════════════════════════════════
+async def web_dashboard(req: web.Request) -> web.Response:
+    now    = datetime.now()
+    uptime = str(now - BOT_STARTED_AT).split(".")[0]
+    b_status = "offline"; b_code = "N/A"; b_ms = 0.0; b_err = ""
+    try:
+        s = await get_session()
+        t0 = datetime.now()
+        async with s.get(BACKEND_URL, timeout=aiohttp.ClientTimeout(total=10)) as r:
+            b_code   = str(r.status)
+            b_ms     = (datetime.now() - t0).total_seconds() * 1000
+            b_status = "online" if r.status == 200 else "degraded"
+    except Exception as e:
+        b_err = str(e)
 
     async def on_startup(application: Application):
         global WEB_RUNNER
@@ -1218,4 +1325,4 @@ def main():
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
