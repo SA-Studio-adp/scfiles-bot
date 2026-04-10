@@ -1,10 +1,10 @@
-# 🎛 SCFiles Backend Manager Bot
+# 🎛 SCFiles Backend Manager Bot v2 (Pyrogram Edition)
 
 A Telegram bot to fully manage your SCFiles backend — movies, series, collections — with TMDB metadata, automatic backups, server monitoring, and a built-in health web service.
 
 ---
 
-## ✅ Features
+## ✅ What Changed from v1
 
 | Feature | Details |
 |---|---|
@@ -29,20 +29,18 @@ A Telegram bot to fully manage your SCFiles backend — movies, series, collecti
 
 ## 🚀 Setup
 
-### 1. Install dependencies
+### 1. Get Pyrogram credentials
 
-```bash
-pip install -r requirements.txt
-```
+Go to **https://my.telegram.org/apps** and create an app to get:
+- `API_ID` (a number)
+- `API_HASH` (a hex string)
 
-### 2. Configure environment variables
+### 2. Configure environment
 
 ```bash
 cp .env.example .env
 # Edit .env with your values
 ```
-
-**Required variables:**
 
 | Variable | Description |
 |---|---|
@@ -58,39 +56,45 @@ cp .env.example .env
 | `LOG_FILE` | Bot log file path used by `/logs` and `/logs` web endpoint (default: `bot.log`) |
 | Timezone | Uses `Asia/Kolkata` (`pytz`) for scheduler and dashboard timestamps |
 
-### 3. Run the bot
+### 3. Install & Run
 
 ```bash
-# Export variables from .env
+pip install -r requirements.txt
 export $(cat .env | xargs)
-
-# Start the bot
 python bot.py
+```
+
+### 4. Docker
+
+```bash
+docker build -t scfiles-bot .
+docker run -d --env-file .env -p 8080:8080 scfiles-bot
 ```
 
 ---
 
 ## 📱 Commands
 
+/tmdb          — Search TMDB for movie or TV show metadata
+/backup        — Trigger a manual backup now
+/backupall     — Download all backend data as one ZIP
+/setbackup     — Set backup channel/chat ID
+/logs          — Download recent bot logs
+/cancel        — Cancel current operation
 ```
-/start         — Main menu with buttons
-/help          — Full command list
-/status        — Check backend server health
-/stats         — Movie/series/collection counts
 
-/movies        — List recent movies
-/series        — List recent series
-/collections   — List all collections
+`/backup` now reports the exact destination chat ID and shows a setup hint if backup target is not configured.
 
-/addmovie      — Add a movie (guided, with TMDB metadata)
-/addseries     — Add a series (with JSON episode input)
-/addcollection — Create a collection
+---
 
-/editmovie     — Edit any field of a movie
+## 🌐 Web Service
 
-/delmovie      — Delete a movie by ID
-/delseries     — Delete a series by ID
-/delcollection — Delete a collection by ID
+The bot also starts a small web service:
+
+- `/` → HTML dashboard with bot/backend health + movie/series/collection counters
+- `/health` → JSON health payload
+- `/backup/all` → Download one ZIP with movies, series, and collections JSON
+- `/logs` → View latest bot log tail in browser
 
 /tmdb          — Search TMDB for movie or TV show metadata
 /backup        — Trigger a manual backup now
@@ -117,13 +121,21 @@ Use `BOT_WEB_URL` so the auto ping job can hit your bot deployment and help keep
 
 ---
 
-## 💾 Backup Format
+## 🌐 Web Dashboard (`:8080`)
 
-Every 2 days (or on `/backup`), the bot sends three files to `BACKUP_CHAT_ID`:
+| Route | Description |
+|---|---|
+| `/` | Full HTML dashboard — KPIs, status panels, data tables |
+| `/health` | JSON health endpoint |
+| `/backup/all` | Download backup ZIP directly from browser |
 
-- `YYYY-MM-DD_HH-MM_movies.json`
-- `YYYY-MM-DD_HH-MM_series.json`
-- `YYYY-MM-DD_HH-MM_collections.json`
+You can change the destination at runtime:
+
+```bash
+/setbackup <chat_id>
+```
+
+This value is persisted in `.backup_config.json` (configurable via `BACKUP_CONFIG_FILE`).
 
 You can change the destination at runtime:
 
@@ -135,15 +147,20 @@ This value is persisted in `.backup_config.json` (configurable via `BACKUP_CONFI
 
 ---
 
-## 🔐 Getting Your Telegram User ID
+## 💾 Backup
 
-Send `/start` to [@userinfobot](https://t.me/userinfobot) on Telegram — it will reply with your numeric user ID.
+- **Auto:** Every 2 days, sends 3 JSON files to `BACKUP_CHAT_ID`
+- **Manual:** `/backup` — sends files to configured chat
+- **ZIP:** `/backupzip` — sends a single ZIP to current chat
+
+### Set backup channel at runtime:
+```
+/setbackup -100xxxxxxxxxx
+```
 
 ---
 
 ## 🔧 Add Series — Episode JSON Format
-
-When adding a series, paste this JSON structure:
 
 ```json
 [
