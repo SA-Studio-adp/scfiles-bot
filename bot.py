@@ -1129,7 +1129,7 @@ async def web_dashboard(req: web.Request) -> web.Response:
 
   <footer>SCFiles Bot Dashboard · Auto-refresh every 60s · {now.strftime("%Y-%m-%d %H:%M:%S")}</footer>
 </div>
-<script>setTimeout(()=>location.reload(),1000);</script>
+<script>setTimeout(()=>location.reload(),60000);</script>
 </body>
 </html>"""
     return web.Response(text=html, content_type="text/html")
