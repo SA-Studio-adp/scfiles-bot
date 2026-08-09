@@ -311,10 +311,6 @@ async def main():
                     drop_pending_updates=True,
                     allowed_updates=Update.ALL_TYPES,
                     bootstrap_retries=-1,
-                    read_timeout=30,
-                    write_timeout=30,
-                    connect_timeout=30,
-                    pool_timeout=30,
                 )
                 logger.info("Bot polling started ✅")
                 break
@@ -331,7 +327,17 @@ async def main():
         await asyncio.Event().wait()
     finally:
         logger.info("Shutting down…")
-        await app.updater.stop(); await app.stop(); await app.shutdown()
+        try:
+            if app.updater.running:
+                await app.updater.stop()
+        except Exception as e:
+            logger.warning("updater.stop(): %s", e)
+        try:
+            if app.running:
+                await app.stop()
+        except Exception as e:
+            logger.warning("app.stop(): %s", e)
+        await app.shutdown()
         await runner.cleanup(); scheduler.shutdown(wait=False)
         from api_client import close_session
         await close_session()
