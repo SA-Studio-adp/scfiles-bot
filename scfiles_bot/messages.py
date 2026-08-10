@@ -16,7 +16,7 @@ PROMO_LINK is the "Join our channel" link appended to every upload
 notification — change it to your actual channel invite link.
 """
 
-PROMO_LINK = "https://t.me/your_channel"
+PROMO_LINK = "@sc_files4"
 
 TEMPLATES = {
 
