@@ -153,12 +153,12 @@ def _promo_button() -> dict:
     return {"inline_keyboard": [[{"text": _PROMO_BUTTON_TEXT, "url": _PROMO_LINK}]]}
 
 def build_context(kind: str, item: dict, title_override: str = None):
-    """Returns (title_key, body_key, format_dict). `item` should already
-    carry TMDB-enriched fields: title, year, overview, genres (list) or
-    genre (str), and movie_count for collections."""
+    """Returns (template_key, format_dict). `item` should already carry
+    TMDB-enriched fields: title, year, overview, genres (list) or genre
+    (str), and movie_count for collections."""
     title = title_override or item.get("title") or item.get("id", "?")
     if kind == "movie":
-        title_key, body_key = "MOVIE_TITLE", "MOVIE_BODY"
+        template_key = "MOVIE"
         ctx = {
             "title":    md_escape(title),
             "year":     md_escape(item.get("year", "")),
@@ -166,7 +166,7 @@ def build_context(kind: str, item: dict, title_override: str = None):
             "overview": md_escape((item.get("overview") or "")[:600]),
         }
     elif kind == "series":
-        title_key, body_key = "SERIES_TITLE", "SERIES_BODY"
+        template_key = "SERIES"
         ctx = {
             "title":    md_escape(title),
             "year":     md_escape(item.get("year", "")),
@@ -174,7 +174,7 @@ def build_context(kind: str, item: dict, title_override: str = None):
             "overview": md_escape((item.get("overview") or "")[:600]),
         }
     elif kind == "episode":
-        title_key, body_key = "EPISODE_UPDATE_TITLE", "EPISODE_UPDATE_BODY"
+        template_key = "EPISODE_UPDATE"
         ctx = {
             "title":        md_escape(title),
             "episode_line": md_escape(item.get("episode_line", "")),
@@ -183,12 +183,12 @@ def build_context(kind: str, item: dict, title_override: str = None):
             "overview":     md_escape((item.get("overview") or "")[:600]),
         }
     else:  # collection
-        title_key, body_key = "COLLECTION_TITLE", "COLLECTION_BODY"
+        template_key = "COLLECTION"
         ctx = {
             "title":       md_escape(title),
             "movie_count": md_escape(len(item.get("movies", []))),
         }
-    return title_key, body_key, ctx
+    return template_key, ctx
 
 # ── sending ────────────────────────────────────────────────────────────────
 async def _tg_call(session: aiohttp.ClientSession, method: str, payload: dict):
@@ -209,7 +209,10 @@ async def _tg_call(session: aiohttp.ClientSession, method: str, payload: dict):
 async def notify_upload(kind: str, item: dict, poster_url: str = None, category: str = "hd",
                          title_override: str = None, session: aiohttp.ClientSession = None) -> int:
     """Sends the notification and logs it. Returns the number of chats it
-    was sent to (0 if NOTIFY_BOT_TOKEN is unset or no channels match)."""
+    was sent to (0 if NOTIFY_BOT_TOKEN is unset or no channels match).
+
+    ONE message per channel: the poster with the whole template as its
+    caption underneath, plus a "Join our channel" button attached."""
     if not NOTIFY_BOT_TOKEN:
         return 0
     channels  = load_channels()
@@ -221,16 +224,15 @@ async def notify_upload(kind: str, item: dict, poster_url: str = None, category:
         logger.info("No channels configured for category(ies) %s — skipping notify", cats)
         return 0
 
-    title_key, body_key, ctx = build_context(kind, item, title_override)
-    title_raw, body_raw = _TEMPLATES.get(title_key, ""), _TEMPLATES.get(body_key, "")
-    if not title_raw or not body_raw:
-        logger.error("Missing template(s) %s / %s in messages.py", title_key, body_key)
+    template_key, ctx = build_context(kind, item, title_override)
+    raw = _TEMPLATES.get(template_key, "")
+    if not raw:
+        logger.error("Missing template %s in messages.py", template_key)
         return 0
     try:
-        title_text = title_raw.format(**ctx)
-        body_text  = body_raw.format(**ctx)
+        caption = raw.format(**ctx)
     except Exception:
-        logger.exception("Template format failed for %s / %s", title_key, body_key)
+        logger.exception("Template format failed for %s", template_key)
         return 0
 
     close_session = False
@@ -240,25 +242,18 @@ async def notify_upload(kind: str, item: dict, poster_url: str = None, category:
     sent = 0
     try:
         for chat_id in chat_ids:
-            # 1) title, as its own plain message — Telegram has no way to put
-            #    text ABOVE a photo within a single message, so this is sent
-            #    first to sit visually above the poster.
-            r1 = await _tg_call(session, "sendMessage", {
-                "chat_id": chat_id, "text": title_text, "parse_mode": "MarkdownV2",
-            })
-            # 2) poster + details, with the "Join our channel" button attached
             if poster_url:
-                r2 = await _tg_call(session, "sendPhoto", {
+                r = await _tg_call(session, "sendPhoto", {
                     "chat_id": chat_id, "photo": poster_url,
-                    "caption": body_text, "parse_mode": "MarkdownV2",
+                    "caption": caption, "parse_mode": "MarkdownV2",
                     "reply_markup": _promo_button(),
                 })
             else:
-                r2 = await _tg_call(session, "sendMessage", {
-                    "chat_id": chat_id, "text": body_text, "parse_mode": "MarkdownV2",
+                r = await _tg_call(session, "sendMessage", {
+                    "chat_id": chat_id, "text": caption, "parse_mode": "MarkdownV2",
                     "disable_web_page_preview": True, "reply_markup": _promo_button(),
                 })
-            if (r1 and r1.get("ok")) or (r2 and r2.get("ok")):
+            if r and r.get("ok"):
                 sent += 1
     finally:
         if close_session:

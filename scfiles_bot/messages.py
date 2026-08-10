@@ -4,16 +4,11 @@ messages.py — SCFiles channel-notification templates
 Edit the strings below to change what gets posted. No other file needs to
 change — notify.py and notify_bot.py both import from here.
 
-Why TITLE and BODY are separate keys
-─────────────────────────────────────
-Telegram always renders a photo's caption BELOW the photo — there's no way
-to put text above an image in a single message. To get the layout
-"Title → Poster → details", the bot sends TWO messages:
-  1. a plain text message using the *_TITLE template
-  2. the poster photo, with the *_BODY template as its caption, plus a
-     "Join our channel" BUTTON (not a text link — buttons are the only
-     Telegram element guaranteed to render as tappable in every client;
-     markdown links inside photo captions are unreliable across clients)
+Each upload is ONE Telegram message: the TMDB poster with this whole
+template as its caption underneath, plus a "Join our channel" button
+attached below that. Title goes first in the template text, so it reads
+title → year/genre → story even though it's all one caption under the
+poster.
 
 Syntax: Telegram Bot API MarkdownV2 — https://core.telegram.org/bots/api#markdownv2-style
   *bold*   _italic_   `code`
@@ -24,39 +19,39 @@ Syntax: Telegram Bot API MarkdownV2 — https://core.telegram.org/bots/api#markd
   ALREADY escaped before being inserted, so don't escape them again here.
 
 PROMO_LINK / PROMO_BUTTON_TEXT control the "Join our channel" button
-appended under every upload notification.
+attached under every upload notification (a button, not a text link —
+buttons are guaranteed to render as tappable in every Telegram client).
 """
 
-PROMO_LINK = "https://t.me/sc_files4"
+PROMO_LINK = "https://t.me/your_channel"
 PROMO_BUTTON_TEXT = "🔔 Join our Channel"
 
 TEMPLATES = {
 
-    # ── movie ──────────────────────────────────────────────────────────
-    "MOVIE_TITLE": '🎬 "{title}"',
-    "MOVIE_BODY": (
+    "MOVIE": (
+        '🎬 "{title}"\n\n'
         "📅 {year}  •  🎭 {genre}\n\n"
         '"{overview}"'
     ),
 
-    # ── series ─────────────────────────────────────────────────────────
-    "SERIES_TITLE": '📺 "{title}"',
-    "SERIES_BODY": (
+    "SERIES": (
+        '📺 "{title}"\n\n'
         "📅 {year}  •  🎭 {genre}\n\n"
         '"{overview}"'
     ),
 
-    # ── new episode(s) added to an existing series ────────────────────
-    "EPISODE_UPDATE_TITLE": '📺 "{title}" — New Episode\\!',
-    "EPISODE_UPDATE_BODY": (
+    # new episode(s) added to an existing series
+    "EPISODE_UPDATE": (
+        '📺 "{title}" — New Episode\\!\n\n'
         "🆕 {episode_line}\n"
         "📅 {year}  •  🎭 {genre}\n\n"
         '"{overview}"'
     ),
 
-    # ── collection ─────────────────────────────────────────────────────
-    "COLLECTION_TITLE": '🗂 "{title}" Collection',
-    "COLLECTION_BODY": "🎬 {movie_count} movies inside",
+    "COLLECTION": (
+        '🗂 "{title}" Collection\n\n'
+        "🎬 {movie_count} movies inside"
+    ),
 
     # ── notify-bot commands (sent by the SAME bot that posts uploads) ────
     "BOT_START": (
