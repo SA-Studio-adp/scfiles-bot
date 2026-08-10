@@ -23,7 +23,7 @@ attached under every upload notification (a button, not a text link —
 buttons are guaranteed to render as tappable in every Telegram client).
 """
 
-PROMO_LINK = "https://t.me/your_channel"
+PROMO_LINK = "https://t.me/sc_files4"
 PROMO_BUTTON_TEXT = "🔔 Join our Channel"
 
 TEMPLATES = {
