@@ -125,3 +125,4 @@ async def close_session():
     global _SESSION
     if _SESSION and not _SESSION.closed:
         await _SESSION.close()
+    _SESSION = None

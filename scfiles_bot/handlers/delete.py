@@ -6,7 +6,7 @@ from telegram.constants import ParseMode
 
 from auth import admin_only
 from utils import bold, code
-from api_client import api_delete
+from api_client import api_delete, api_err
 from handlers.states import DM_ID, DS_ID, DC_ID
 
 @admin_only

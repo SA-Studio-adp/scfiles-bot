@@ -4,7 +4,7 @@ from datetime import datetime
 
 from telegram.constants import ParseMode
 
-from config import state, IST, logger
+from config import state, IST, logger, _ENV_ADMIN_IDS
 from api_client import api_get
 
 async def _payloads() -> dict:

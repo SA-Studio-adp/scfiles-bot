@@ -31,9 +31,9 @@ from datetime import datetime
 import aiohttp
 
 try:
-    from messages import TEMPLATES as _TEMPLATES, PROMO_LINK as _PROMO_LINK
+    from messages import TEMPLATES as _TEMPLATES, PROMO_LINK as _PROMO_LINK, PROMO_BUTTON_TEXT as _PROMO_BUTTON_TEXT
 except ImportError:
-    _TEMPLATES, _PROMO_LINK = {}, "https://t.me/"
+    _TEMPLATES, _PROMO_LINK, _PROMO_BUTTON_TEXT = {}, "https://t.me/", "🔔 Join our Channel"
 
 logger = logging.getLogger("scfiles-bot.notify")
 
@@ -146,47 +146,49 @@ def _genre_line(genres) -> str:
     names = [g.get("name", "") if isinstance(g, dict) else str(g) for g in genres]
     return " / ".join(n for n in names if n)
 
+def _promo_button() -> dict:
+    """Inline keyboard with the 'Join our channel' button. A button, not a
+    text link, because markdown links inside photo captions render
+    unreliably across Telegram clients — buttons always work."""
+    return {"inline_keyboard": [[{"text": _PROMO_BUTTON_TEXT, "url": _PROMO_LINK}]]}
+
 def build_context(kind: str, item: dict, title_override: str = None):
-    """Returns (template_name, format_dict). `item` should already carry
-    TMDB-enriched fields: title, year, overview, genres (list) or genre (str),
-    and movie_count for collections."""
+    """Returns (title_key, body_key, format_dict). `item` should already
+    carry TMDB-enriched fields: title, year, overview, genres (list) or
+    genre (str), and movie_count for collections."""
     title = title_override or item.get("title") or item.get("id", "?")
     if kind == "movie":
-        template = "MOVIE"
+        title_key, body_key = "MOVIE_TITLE", "MOVIE_BODY"
         ctx = {
             "title":    md_escape(title),
             "year":     md_escape(item.get("year", "")),
             "genre":    md_escape(item.get("genre") or _genre_line(item.get("genres"))),
             "overview": md_escape((item.get("overview") or "")[:600]),
-            "promo_link": _PROMO_LINK,
         }
     elif kind == "series":
-        template = "SERIES"
+        title_key, body_key = "SERIES_TITLE", "SERIES_BODY"
         ctx = {
             "title":    md_escape(title),
             "year":     md_escape(item.get("year", "")),
             "genre":    md_escape(item.get("genre") or _genre_line(item.get("genres"))),
             "overview": md_escape((item.get("overview") or "")[:600]),
-            "promo_link": _PROMO_LINK,
         }
     elif kind == "episode":
-        template = "EPISODE_UPDATE"
+        title_key, body_key = "EPISODE_UPDATE_TITLE", "EPISODE_UPDATE_BODY"
         ctx = {
             "title":        md_escape(title),
             "episode_line": md_escape(item.get("episode_line", "")),
             "year":         md_escape(item.get("year", "")),
             "genre":        md_escape(item.get("genre") or _genre_line(item.get("genres"))),
             "overview":     md_escape((item.get("overview") or "")[:600]),
-            "promo_link":   _PROMO_LINK,
         }
     else:  # collection
-        template = "COLLECTION"
+        title_key, body_key = "COLLECTION_TITLE", "COLLECTION_BODY"
         ctx = {
             "title":       md_escape(title),
             "movie_count": md_escape(len(item.get("movies", []))),
-            "promo_link":  _PROMO_LINK,
         }
-    return template, ctx
+    return title_key, body_key, ctx
 
 # ── sending ────────────────────────────────────────────────────────────────
 async def _tg_call(session: aiohttp.ClientSession, method: str, payload: dict):
@@ -219,15 +221,16 @@ async def notify_upload(kind: str, item: dict, poster_url: str = None, category:
         logger.info("No channels configured for category(ies) %s — skipping notify", cats)
         return 0
 
-    template_name, ctx = build_context(kind, item, title_override)
-    raw = _TEMPLATES.get(template_name, "")
-    if not raw:
-        logger.error("No template named %s in messages.py", template_name)
+    title_key, body_key, ctx = build_context(kind, item, title_override)
+    title_raw, body_raw = _TEMPLATES.get(title_key, ""), _TEMPLATES.get(body_key, "")
+    if not title_raw or not body_raw:
+        logger.error("Missing template(s) %s / %s in messages.py", title_key, body_key)
         return 0
     try:
-        caption = raw.format(**ctx)
+        title_text = title_raw.format(**ctx)
+        body_text  = body_raw.format(**ctx)
     except Exception:
-        logger.exception("Template format failed for %s", template_name)
+        logger.exception("Template format failed for %s / %s", title_key, body_key)
         return 0
 
     close_session = False
@@ -237,17 +240,25 @@ async def notify_upload(kind: str, item: dict, poster_url: str = None, category:
     sent = 0
     try:
         for chat_id in chat_ids:
+            # 1) title, as its own plain message — Telegram has no way to put
+            #    text ABOVE a photo within a single message, so this is sent
+            #    first to sit visually above the poster.
+            r1 = await _tg_call(session, "sendMessage", {
+                "chat_id": chat_id, "text": title_text, "parse_mode": "MarkdownV2",
+            })
+            # 2) poster + details, with the "Join our channel" button attached
             if poster_url:
-                r = await _tg_call(session, "sendPhoto", {
+                r2 = await _tg_call(session, "sendPhoto", {
                     "chat_id": chat_id, "photo": poster_url,
-                    "caption": caption, "parse_mode": "MarkdownV2",
+                    "caption": body_text, "parse_mode": "MarkdownV2",
+                    "reply_markup": _promo_button(),
                 })
             else:
-                r = await _tg_call(session, "sendMessage", {
-                    "chat_id": chat_id, "text": caption,
-                    "parse_mode": "MarkdownV2", "disable_web_page_preview": False,
+                r2 = await _tg_call(session, "sendMessage", {
+                    "chat_id": chat_id, "text": body_text, "parse_mode": "MarkdownV2",
+                    "disable_web_page_preview": True, "reply_markup": _promo_button(),
                 })
-            if r and r.get("ok"):
+            if (r1 and r1.get("ok")) or (r2 and r2.get("ok")):
                 sent += 1
     finally:
         if close_session:

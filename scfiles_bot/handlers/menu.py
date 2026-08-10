@@ -8,7 +8,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 
-from config import state, IST
+from config import state, IST, BACKEND_URL
 from auth import is_admin
 from utils import esc, bold, code
 from api_client import sess, api_get, fetch_all

@@ -37,7 +37,7 @@ async def error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             try:
                 await dest.reply_text(
                     "❌ <b>An error occurred.</b> The admins have been notified.\n"
-                    f"<i>If it keeps happening, use /cancel and try again.</i>",
+                    "<i>If it keeps happening, use /cancel and try again.</i>",
                     parse_mode=ParseMode.HTML)
             except Exception:
                 pass

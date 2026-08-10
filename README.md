@@ -63,6 +63,13 @@ scfiles_bot/
 
 Nothing else needs touching — `config.state` is shared automatically.
 
+After any change — especially to imports — run the smoke tests
+(`tests/README.md`): `python tests/test_handlers_smoke.py &&
+python tests/test_confirm_flows_smoke.py`. They mock the network and just
+verify every handler actually runs without raising, which catches the
+"forgot an import when splitting/editing a file" class of bug immediately
+instead of waiting for it to crash in production.
+
 ## v5: channel notifications
 
 Two bots are involved:
@@ -81,6 +88,17 @@ uploads sent to that category.
 
 **Sending a notification:** after any successful `/addmovie`, `/addseries`,
 `/addcollection`, or a saved `/editseries` (new episode), the bot asks:
+"Send a notification?" → pick a category → enter a title → confirm. The
+notify bot then posts, as **two messages** (Telegram can't put text above a
+photo in one message):
+1. the title, in quotes
+2. the TMDB poster with year, genre, and the TMDB overview (quoted) as its
+   caption, plus a **"🔔 Join our Channel" button** underneath (a real
+   button, not a text link — links inside photo captions render
+   unreliably across Telegram clients, buttons always work)
+
+Wording lives in `scfiles_bot/messages.py` as `*_TITLE`/`*_BODY` pairs per
+content type, plus `PROMO_LINK` / `PROMO_BUTTON_TEXT` for the button.
 "Send a notification?" → pick a category → enter a title → confirm. The
 notify bot then posts the TMDB poster with title (quoted), year, genre, the
 TMDB overview (quoted), and a "Join our channel" link — all editable in
