@@ -1,5 +1,5 @@
 """backup.py — building the backup ZIP / sending backup docs to a chat."""
-import io, json, zipfile
+import asyncio, io, json, zipfile
 from datetime import datetime
 
 from telegram.constants import ParseMode

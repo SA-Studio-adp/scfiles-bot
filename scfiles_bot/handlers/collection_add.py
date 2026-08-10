@@ -1,18 +1,16 @@
 """handlers/collection_add.py — the /addcollection conversation: slug →
 name → banner → BGM → repeatable [TMDB id → quality button → dl link] loop
-→ confirm, plus the channel notification on save."""
-import asyncio
-
+→ confirm, followed by the shared post-upload notify flow."""
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
 from telegram.constants import ParseMode
 
-import notify
 from auth import admin_only
 from utils import esc, bold, code, italic
 from api_client import api_post, api_err
 from tmdb import tmdb_movie, fmt_movie, poster
 from keyboards import back_kb
+from handlers.notify_flow import start_notify_flow
 
 @admin_only
 async def cmd_addcollection(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -205,16 +203,20 @@ async def ac_confirm_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "bg-music": col.get("col_bgmusic", ""),
         "movies":   col.get("movies", []),
     })
-    if r and r.get("success"):
-        await q.edit_message_text(
-            f"✅ <b>Collection created!</b>\n"
-            f"📛 {bold(col['col_name'])}  |  🎬 {len(col.get('movies', []))} movies\n"
-            f"📊 Total collections: {bold(r['total'])}",
-            parse_mode=ParseMode.HTML, reply_markup=back_kb())
-        asyncio.create_task(notify.notify_upload("collection", col))
-    else:
+    if not (r and r.get("success")):
         await q.edit_message_text(
             f"❌ <b>Failed:</b> {code(api_err(r))}\n"
             f"<i>If backend was sleeping, try again in 30s.</i>",
             parse_mode=ParseMode.HTML)
-    return ConversationHandler.END
+        return ConversationHandler.END
+
+    await q.edit_message_text(
+        f"✅ <b>Collection created!</b>\n"
+        f"📛 {bold(col['col_name'])}  |  🎬 {len(col.get('movies', []))} movies\n"
+        f"📊 Total collections: {bold(r['total'])}",
+        parse_mode=ParseMode.HTML, reply_markup=back_kb())
+
+    item = dict(col)
+    item["title"] = col.get("col_name") or col.get("col_id")
+    poster_url = col.get("col_banner") or None
+    return await start_notify_flow(update, ctx, kind="collection", item=item, poster_url=poster_url)

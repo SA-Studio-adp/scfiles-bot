@@ -1,11 +1,9 @@
-"""handlers/series_add.py — the /addseries conversation."""
-import asyncio
-
+"""handlers/series_add.py — the /addseries conversation, followed by the
+shared post-upload notify flow (handlers/notify_flow.py)."""
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
 from telegram.constants import ParseMode
 
-import notify
 from auth import admin_only
 from utils import esc, bold, code, italic
 from api_client import api_post, api_err
@@ -14,6 +12,7 @@ from keyboards import yes_no_kb, back_kb, ep_more_kb
 from handlers.states import (AS_TMDB, AS_SN, AS_EP, AS_EP360, AS_EP720, AS_EP1080,
                               AS_EP_SUB, AS_EP_MORE)
 from handlers.series_common import _ep_save, _parse_subtitles, _series_summary
+from handlers.notify_flow import start_notify_flow
 
 @admin_only
 async def cmd_addseries(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -137,23 +136,22 @@ async def as_confirm_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     sr = ctx.user_data.pop("series", {}); ctx.user_data.clear()
     await q.edit_message_text("⏳ <i>Saving series…</i>", parse_mode=ParseMode.HTML)
     r = await api_post("/api/series", sr)
-    if r and r.get("success"):
-        await q.edit_message_text(
-            f"✅ <b>Series saved!</b>\n📊 Total series: {bold(r['count'])}",
-            parse_mode=ParseMode.HTML, reply_markup=back_kb())
-        asyncio.create_task(_notify_series(sr))
-    else:
+    if not (r and r.get("success")):
         await q.edit_message_text(f"❌ <b>Failed:</b> {code(api_err(r))}", parse_mode=ParseMode.HTML)
-    return ConversationHandler.END
+        return ConversationHandler.END
 
-async def _notify_series(sr: dict):
-    """Fire-and-forget channel notification for a newly added series."""
-    tid = str(sr.get("tmdb_id",""))
+    await q.edit_message_text(
+        f"✅ <b>Series saved!</b>\n📊 Total series: {bold(r['count'])}",
+        parse_mode=ParseMode.HTML, reply_markup=back_kb())
+
+    tid = str(sr.get("tmdb_id", ""))
     info = await tmdb_tv(int(tid)) if tid.isdigit() else None
-    payload = dict(sr)
+    item = dict(sr)
+    poster_url = None
     if info:
-        payload["title"]    = info.get("name", sr.get("id"))
-        payload["year"]     = (info.get("first_air_date") or "")[:4]
-        payload["rating"]   = round(info.get("vote_average", 0), 1)
-        payload["overview"] = info.get("overview", "")
-    await notify.notify_upload("series", payload, poster(info) if info else None)
+        item["title"]    = info.get("name", sr.get("id"))
+        item["year"]     = (info.get("first_air_date") or "")[:4]
+        item["genres"]   = info.get("genres", [])
+        item["overview"] = info.get("overview", "")
+        poster_url = poster(info)
+    return await start_notify_flow(update, ctx, kind="series", item=item, poster_url=poster_url)

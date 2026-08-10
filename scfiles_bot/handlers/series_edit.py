@@ -8,6 +8,7 @@ from telegram.constants import ParseMode
 from auth import admin_only
 from utils import esc, bold, code, italic
 from api_client import api_get, api_post, api_err
+from tmdb import tmdb_tv, poster
 from keyboards import yes_no_kb, back_kb, ep_more_kb
 from handlers.states import (ESS_ID, ESS_ACTION, ESS_SN, ESS_EP, ESS_EP360, ESS_EP720,
                               ESS_EP1080, ESS_EP_SUB, ESS_EP_MORE, ESS_DEL_EP,
@@ -15,6 +16,7 @@ from handlers.states import (ESS_ID, ESS_ACTION, ESS_SN, ESS_EP, ESS_EP360, ESS_
 from handlers.series_common import (_ep_save, _parse_subtitles, _fmt_subtitles,
                                      _series_summary, _link_input, _q_prompt,
                                      _season_picker_kb)
+from handlers.notify_flow import start_notify_flow
 
 @admin_only
 async def cmd_editseries(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -255,10 +257,23 @@ async def ess_ep_more_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await q.edit_message_text("⏳ <i>Saving…</i>", parse_mode=ParseMode.HTML)
     r = await api_post("/api/series", sr)   # backend uses POST as upsert
     ctx.user_data.clear()
-    if r and r.get("success"):
-        await q.edit_message_text(
-            f"✅ <b>Series updated!</b>\n{summary}\n📊 Total episodes: <b>{total_eps}</b>",
-            parse_mode=ParseMode.HTML, reply_markup=back_kb())
-    else:
+    if not (r and r.get("success")):
         await q.edit_message_text(f"❌ <b>Failed:</b> {code(api_err(r))}", parse_mode=ParseMode.HTML)
-    return ConversationHandler.END
+        return ConversationHandler.END
+
+    await q.edit_message_text(
+        f"✅ <b>Series updated!</b>\n{summary}\n📊 Total episodes: <b>{total_eps}</b>",
+        parse_mode=ParseMode.HTML, reply_markup=back_kb())
+
+    tid = str(sr.get("tmdb_id", ""))
+    info = await tmdb_tv(int(tid)) if tid.isdigit() else None
+    item = dict(sr)
+    poster_url = None
+    if info:
+        item["title"]    = info.get("name", sr.get("id"))
+        item["year"]     = (info.get("first_air_date") or "")[:4]
+        item["genres"]   = info.get("genres", [])
+        item["overview"] = info.get("overview", "")
+        poster_url = poster(info)
+    item["episode_line"] = summary.strip().replace("\n", " · ")
+    return await start_notify_flow(update, ctx, kind="episode", item=item, poster_url=poster_url)

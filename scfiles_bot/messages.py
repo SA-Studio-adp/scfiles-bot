@@ -1,58 +1,74 @@
 """
-messages.py — SCFiles v4 channel-notification templates
+messages.py — SCFiles channel-notification templates
 ─────────────────────────────────────────────────────────────────────────────
-Edit the strings below to change what gets posted to your channels/groups
-whenever a movie, series, or collection is uploaded. No other file needs to
-change — bot.py imports TEMPLATES from here.
+Edit the strings below to change what gets posted. No other file needs to
+change — notify.py and notify_bot.py both import from here.
 
 Syntax: Telegram Bot API MarkdownV2 — https://core.telegram.org/bots/api#markdownv2-style
-  *bold*   _italic_   `code`   [text](url)   ||spoiler||
+  *bold*   _italic_   `code`   [text](url)
   Literal special chars ( _ * [ ] ( ) ~ ` > # + - = | { } . ! ) must be
-  escaped with a backslash when they are NOT being used for formatting.
+  escaped with a backslash when NOT used for formatting. Placeholders in
+  {curly_braces} below are filled in automatically — values that come from
+  your database/TMDB (title, overview, year, genre, season_line, etc) are
+  ALREADY escaped before being inserted, so don't escape them again here.
 
-Placeholders in {curly_braces} are filled in automatically by notify.py.
-Values that come from your database (title, overview, year, rating,
-season_line, movie_count) are ALREADY MarkdownV2-escaped before being
-inserted — don't escape them again in this file.
-`qualities` and `share_url` are inserted raw (used inside a `code` span /
-a link target, where escaping isn't wanted).
-
-Available placeholders per template:
-  MOVIE_HD / MOVIE_PREDVD : title, year, rating, qualities, overview, share_url
-  SERIES                  : title, year, rating, season_line, overview, share_url
-  COLLECTION              : title, movie_count, share_url
+PROMO_LINK is the "Join our channel" link appended to every upload
+notification — change it to your actual channel invite link.
 """
+
+PROMO_LINK = "https://t.me/your_channel"
 
 TEMPLATES = {
 
-    "MOVIE_HD": (
-        "🎬 *{title}*\n"
-        "📅 {year}  •  ⭐ {rating}/10\n"
-        "📥 Quality: `{qualities}`\n\n"
-        "{overview}\n\n"
-        "🔗 [Get it here]({share_url})"
-    ),
-
-    "MOVIE_PREDVD": (
-        "🎬 *{title}*  \\[PreDVD]\n"
-        "📅 {year}  •  ⭐ {rating}/10\n"
-        "📥 Quality: `{qualities}`\n\n"
-        "⚠️ Early PreDVD print — quality may improve on a later re\\-upload\\.\n\n"
-        "🔗 [Get it here]({share_url})"
+    # ── movie / series / collection upload notifications ─────────────────
+    # Each notification is sent as a photo (TMDB portrait poster) with this
+    # text as the caption underneath it.
+    "MOVIE": (
+        '🎬 "{title}"\n\n'
+        "📅 {year}  •  🎭 {genre}\n\n"
+        '📝 "{overview}"\n\n'
+        "━━━━━━━━━━━━━━\n"
+        "🔔 [Join our channel]({promo_link})"
     ),
 
     "SERIES": (
-        "📺 *{title}*\n"
-        "📅 {year}  •  ⭐ {rating}/10\n"
-        "🆕 {season_line}\n\n"
-        "{overview}\n\n"
-        "🔗 [Get it here]({share_url})"
+        '📺 "{title}"\n\n'
+        "📅 {year}  •  🎭 {genre}\n\n"
+        '📝 "{overview}"\n\n'
+        "━━━━━━━━━━━━━━\n"
+        "🔔 [Join our channel]({promo_link})"
+    ),
+
+    "EPISODE_UPDATE": (
+        '📺 "{title}" — New Episode\\!\n\n'
+        "🆕 {episode_line}\n"
+        "📅 {year}  •  🎭 {genre}\n\n"
+        '📝 "{overview}"\n\n'
+        "━━━━━━━━━━━━━━\n"
+        "🔔 [Join our channel]({promo_link})"
     ),
 
     "COLLECTION": (
-        "🗂 *{title}* collection updated\n"
+        '🗂 "{title}" Collection\n\n'
         "🎬 {movie_count} movies inside\n\n"
-        "🔗 [Browse the collection]({share_url})"
+        "━━━━━━━━━━━━━━\n"
+        "🔔 [Join our channel]({promo_link})"
     ),
+
+    # ── notify-bot commands (sent by the SAME bot that posts uploads) ────
+    "BOT_START": (
+        "👋 *Welcome\\!*\n\n"
+        "This channel is fed automatically — new *movies*, *series*, and "
+        "*collections* get posted here the moment they're uploaded\\.\n\n"
+        "Use /uploads to see the last 10 uploads\\.\n\n"
+        "━━━━━━━━━━━━━━\n"
+        "🔔 [Join our channel]({promo_link})"
+    ),
+
+    "BOT_UPLOADS_HEADER": "📋 *Last {count} uploads*\n",
+
+    "BOT_UPLOADS_ITEM": "{icon} *{title}*  ·  {category_label}  ·  _{when}_",
+
+    "BOT_UPLOADS_EMPTY": "📭 No uploads logged yet\\.",
 
 }

@@ -36,6 +36,9 @@ from handlers import collection_edit as h_col_edit
 from handlers import delete as h_delete
 from handlers import tmdb_search as h_tmdb
 from handlers import menu as h_menu
+from handlers import notify_flow as h_notify
+from notify import NOTIFY_BOT_TOKEN
+from notify_bot import build_notify_app, register_commands as register_notify_commands
 
 
 async def main():
@@ -85,6 +88,17 @@ async def main():
         category=UserWarning,
     )
 
+    # Shared post-upload notify states — spliced into every conversation
+    # that can end in a successful upload (addmovie/addseries/addcollection/
+    # editseries). See handlers/notify_flow.py.
+    def _notify_states():
+        return {
+            NOTIFY_ASK:     [CallbackQueryHandler(h_notify.notify_ask_cb,     pattern="^ntf_")],
+            NOTIFY_CAT:     [CallbackQueryHandler(h_notify.notify_cat_cb,     pattern="^ntf_")],
+            NOTIFY_TITLE:   [MessageHandler(CB_ALL, h_notify.notify_title_msg)],
+            NOTIFY_CONFIRM: [CallbackQueryHandler(h_notify.notify_confirm_cb, pattern="^ntf_")],
+        }
+
     # ── add movie ─────────────────────────────────────────────────────────
     app.add_handler(ConversationHandler(
         entry_points=[CommandHandler("addmovie", h_movie_add.cmd_addmovie)],
@@ -97,6 +111,7 @@ async def main():
             AM_SUB:    [MessageHandler(CB_ALL, h_movie_add.am_sub)],
             AM_POS:    [CallbackQueryHandler(h_movie_add.am_pos_cb,     pattern="^pos_")],
             AM_CONFIRM:[CallbackQueryHandler(h_movie_add.am_confirm_cb, pattern="^mov_(confirm|cancel)")],
+            **_notify_states(),
         },
         fallbacks=[CommandHandler("cancel", h_basic.cmd_cancel)],
         per_message=False))
@@ -114,6 +129,7 @@ async def main():
             AS_EP_SUB: [MessageHandler(CB_ALL, h_series_add.as_ep_sub)],
             AS_EP_MORE:[CallbackQueryHandler(h_series_add.as_ep_more_cb, pattern="^ep_"),
                         CallbackQueryHandler(h_series_add.as_confirm_cb, pattern="^sr_")],
+            **_notify_states(),
         },
         fallbacks=[CommandHandler("cancel", h_basic.cmd_cancel)],
         per_message=False))
@@ -134,6 +150,7 @@ async def main():
             ESS_EP_SUB:  [MessageHandler(CB_ALL, h_series_edit.ess_ep_sub)],
             ESS_EP_MORE: [CallbackQueryHandler(h_series_edit.ess_ep_more_cb, pattern="^ep_")],
             ESS_DEL_EP:  [CallbackQueryHandler(h_series_edit.ess_del_ep_cb,  pattern="^ess_")],
+            **_notify_states(),
         },
         fallbacks=[CommandHandler("cancel", h_basic.cmd_cancel)],
         per_message=False))
@@ -151,6 +168,7 @@ async def main():
             AC_MOV_DL:   [MessageHandler(CB_ALL, h_col_add.ac_mov_dl)],
             AC_MOV_MORE: [CallbackQueryHandler(h_col_add.ac_mov_more_cb, pattern="^acm_"),
                           CallbackQueryHandler(h_col_add.ac_confirm_cb,  pattern="^col_")],
+            **_notify_states(),
         },
         fallbacks=[CommandHandler("cancel", h_basic.cmd_cancel)],
         per_message=False))
@@ -254,6 +272,7 @@ async def main():
     logger.info("Scheduler: backup every 2d, ping every %dm", AUTO_PING_MIN)
 
     try:
+        notify_app = None
         await app.initialize()
         await app.start()
 
@@ -324,6 +343,31 @@ async def main():
                 else:
                     logger.error("start_polling failed: %s", e)
                     raise
+
+        # ── notify bot (optional second Application) ────────────────────
+        notify_app = None
+        if NOTIFY_BOT_TOKEN:
+            try:
+                notify_app = build_notify_app(NOTIFY_BOT_TOKEN)
+                await notify_app.initialize()
+                await notify_app.start()
+                await register_notify_commands(notify_app)
+                try:
+                    await notify_app.bot.delete_webhook(drop_pending_updates=True)
+                except Exception as e:
+                    logger.warning("notify bot delete_webhook: %s", e)
+                await notify_app.updater.start_polling(
+                    drop_pending_updates=True,
+                    allowed_updates=Update.ALL_TYPES,
+                    bootstrap_retries=-1,
+                )
+                logger.info("Notify bot polling started ✅ (/start, /uploads)")
+            except Exception as e:
+                logger.error("Notify bot failed to start: %s — continuing without it", e)
+                notify_app = None
+        else:
+            logger.info("NOTIFY_BOT_TOKEN not set — channel notifications disabled")
+
         await asyncio.Event().wait()
     finally:
         logger.info("Shutting down…")
@@ -338,6 +382,15 @@ async def main():
         except Exception as e:
             logger.warning("app.stop(): %s", e)
         await app.shutdown()
+        if notify_app is not None:
+            try:
+                if notify_app.updater.running:
+                    await notify_app.updater.stop()
+                if notify_app.running:
+                    await notify_app.stop()
+                await notify_app.shutdown()
+            except Exception as e:
+                logger.warning("notify_app shutdown: %s", e)
         await runner.cleanup(); scheduler.shutdown(wait=False)
         from api_client import close_session
         await close_session()

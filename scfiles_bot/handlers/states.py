@@ -19,3 +19,7 @@ risking two modules picking the same integer."""
     EC_ID, EC_ACTION, EC_FIELD_VALUE,                    # editcollection
     EC_MOV_TMDB, EC_MOV_QUAL, EC_MOV_DL, EC_DEL_MOV_PICK,
 ) = range(50)
+
+# v5 additions — shared post-upload notify flow (reused across every
+# add/edit conversation: addmovie, addseries, addcollection, editseries)
+NOTIFY_ASK, NOTIFY_CAT, NOTIFY_TITLE, NOTIFY_CONFIRM = range(50, 54)

@@ -27,8 +27,9 @@ scfiles_bot/
 ├── keyboards.py                  ← shared inline keyboards
 ├── errors.py                      ← global PTB error handler
 ├── scheduler.py                    ← periodic backup + self-ping jobs
-├── notify.py                        ← v4 channel-notification engine
-├── messages.py                       ← v4 EDIT THIS to restyle channel captions
+├── notify.py                        ← channel-notification engine (routing, sending, upload history)
+├── notify_bot.py                     ← second Application (NOTIFY_BOT_TOKEN): /start, /uploads
+├── messages.py                        ← EDIT THIS to restyle every notification/command message
 │
 ├── handlers/
 │   ├── states.py             ← every ConversationHandler state constant
@@ -44,6 +45,7 @@ scfiles_bot/
 │   ├── collection_edit.py                 ← /editcollection conversation
 │   ├── delete.py                            ← /delmovie /delseries /delcollection
 │   ├── tmdb_search.py                         ← /tmdb conversation
+│   ├── notify_flow.py                          ← shared "notify? → category → title → confirm"
 │   └── menu.py                                  ← inline "main menu" callbacks
 │
 └── web/
@@ -61,8 +63,28 @@ scfiles_bot/
 
 Nothing else needs touching — `config.state` is shared automatically.
 
-## v4: channel notifications
+## v5: channel notifications
 
-See the docstring at the top of `scfiles_bot/notify.py`. Short version:
-set `NOTIFY_BOT_TOKEN`, edit `scfiles_bot/messages.py` for wording, and run
-`/addchannel` inside each channel/group to pick **PreDVD / HD / All**.
+Two bots are involved:
+- **Admin bot** (`TELEGRAM_TOKEN`) — you talk to this one; it runs all the
+  `/add*` `/edit*` `/del*` commands.
+- **Notify bot** (`NOTIFY_BOT_TOKEN`) — a separate bot that only posts
+  uploads to your channels and answers `/start` and `/uploads` there. Add
+  it to your channels/groups as admin too.
+
+**Register a channel:** run `/addchannel` with the ADMIN bot, inside the
+target channel/group (or in a DM with the chat ID as an argument). It
+verifies the chat is actually a channel/group — not a person's DM — before
+letting you pick a category: **📀 PreDVD / 🎬 HD / 🌐 All**. Channels
+registered under "All" get every upload; "PreDVD"/"HD" channels only get
+uploads sent to that category.
+
+**Sending a notification:** after any successful `/addmovie`, `/addseries`,
+`/addcollection`, or a saved `/editseries` (new episode), the bot asks:
+"Send a notification?" → pick a category → enter a title → confirm. The
+notify bot then posts the TMDB poster with title (quoted), year, genre, the
+TMDB overview (quoted), and a "Join our channel" link — all editable in
+`scfiles_bot/messages.py` (including `PROMO_LINK`).
+
+`/removechannel <predvd|hd|all> <chat_id>` and `/listchannels` manage the
+registered list.

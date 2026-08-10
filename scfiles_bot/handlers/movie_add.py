@@ -1,13 +1,10 @@
 """handlers/movie_add.py — the /addmovie conversation (TMDB id → extras →
-480p/720p/1080p → subtitles → position → confirm) plus the fire-and-forget
-channel notification once the movie is saved."""
-import asyncio
-
+480p/720p/1080p → subtitles → position → confirm), followed by the shared
+post-upload notify flow (handlers/notify_flow.py)."""
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
 from telegram.constants import ParseMode
 
-import notify
 from auth import admin_only
 from utils import esc, bold, code, italic
 from api_client import api_post, api_err
@@ -15,6 +12,7 @@ from tmdb import tmdb_movie, fmt_movie, poster
 from keyboards import yes_no_kb, back_kb
 from handlers.states import (AM_TMDB, AM_EXTRA, AM_DL480, AM_DL720, AM_DL1080,
                               AM_SUB, AM_POS, AM_CONFIRM)
+from handlers.notify_flow import start_notify_flow
 
 @admin_only
 async def cmd_addmovie(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -129,22 +127,22 @@ async def am_confirm_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await q.edit_message_text("⏳ <i>Adding movie…</i>", parse_mode=ParseMode.HTML)
     r = await api_post("/api/movies", {**m, "position": pos})
     ctx.user_data.clear()
-    if r and r.get("success"):
-        await q.edit_message_text(
-            f"✅ <b>Movie added to {pos}!</b>\n📊 Total: {bold(r['count'])}",
-            parse_mode=ParseMode.HTML, reply_markup=back_kb())
-        asyncio.create_task(_notify_movie(m))
-    else:
+    if not (r and r.get("success")):
         await q.edit_message_text(f"❌ <b>Failed:</b> {code(api_err(r))}", parse_mode=ParseMode.HTML)
-    return ConversationHandler.END
+        return ConversationHandler.END
 
-async def _notify_movie(m: dict):
-    """Fire-and-forget channel notification for a newly added movie."""
-    info = await tmdb_movie(int(m["tmdb_id"])) if str(m.get("tmdb_id","")).isdigit() else None
-    payload = dict(m)
+    await q.edit_message_text(
+        f"✅ <b>Movie added to {pos}!</b>\n📊 Total: {bold(r['count'])}",
+        parse_mode=ParseMode.HTML, reply_markup=back_kb())
+
+    # Enrich with TMDB info for the notification (title/year/genre/overview/poster)
+    info = await tmdb_movie(int(m["tmdb_id"])) if str(m.get("tmdb_id", "")).isdigit() else None
+    item = dict(m)
+    poster_url = None
     if info:
-        payload["title"]    = info.get("title", m.get("id"))
-        payload["year"]     = (info.get("release_date") or "")[:4]
-        payload["rating"]   = round(info.get("vote_average", 0), 1)
-        payload["overview"] = info.get("overview", "")
-    await notify.notify_upload("movie", payload, poster(info) if info else None)
+        item["title"]    = info.get("title", m.get("id"))
+        item["year"]     = (info.get("release_date") or "")[:4]
+        item["genres"]   = info.get("genres", [])
+        item["overview"] = info.get("overview", "")
+        poster_url = poster(info)
+    return await start_notify_flow(update, ctx, kind="movie", item=item, poster_url=poster_url)
