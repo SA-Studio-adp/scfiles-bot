@@ -18,22 +18,22 @@ from utils import esc
 import notify
 
 try:
-    from messages import TEMPLATES as _TEMPLATES, PROMO_LINK as _PROMO_LINK, PROMO_BUTTON_TEXT as _PROMO_BUTTON_TEXT
+    from messages import TEMPLATES as _TEMPLATES, WEBSITE_LINK as _WEBSITE_LINK
 except ImportError:
-    _TEMPLATES, _PROMO_LINK, _PROMO_BUTTON_TEXT = {}, "https://t.me/", "🔔 Join our Channel"
+    _TEMPLATES, _WEBSITE_LINK = {}, "https://yourwebsite.com"
 
 
 def _fmt(name: str, **kw) -> str:
     return _TEMPLATES.get(name, "").format(**kw)
 
-def _promo_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton(_PROMO_BUTTON_TEXT, url=_PROMO_LINK)]])
+def _website_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🌐 Visit Website", url=_WEBSITE_LINK)]])
 
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        _fmt("BOT_START"), parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True, reply_markup=_promo_kb())
+        _fmt("BOT_START") + notify._footer(), parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True, reply_markup=_website_kb())
 
 
 def _relative_time(iso_ts: str) -> str:

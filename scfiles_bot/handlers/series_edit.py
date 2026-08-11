@@ -15,7 +15,7 @@ from handlers.states import (ESS_ID, ESS_ACTION, ESS_SN, ESS_EP, ESS_EP360, ESS_
                               ESS_SN_PICK, ESS_EDIT_PICK)
 from handlers.series_common import (_ep_save, _parse_subtitles, _fmt_subtitles,
                                      _series_summary, _link_input, _q_prompt,
-                                     _season_picker_kb)
+                                     _season_picker_kb, _session_upload_summary)
 from handlers.notify_flow import start_notify_flow
 
 @admin_only
@@ -39,6 +39,12 @@ async def ess_id(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return ESS_ID
     ctx.user_data["edit_series"] = sr
     ctx.user_data["cur_ep"]      = {}
+    # Snapshot of season numbers that existed BEFORE this edit session, plus
+    # a running log of every (season, episode) touched this session — used
+    # to build the "S1 . EP 13-16 has been uploaded" / "new season" notify
+    # text once the session is saved (see ess_ep_more_cb).
+    ctx.user_data["orig_season_numbers"] = {s["season_number"] for s in sr.get("seasons", [])}
+    ctx.user_data["session_episodes"] = []
     await update.message.reply_text(
         f"✏️ <b>Editing:</b> {code(sid)}\n{_series_summary(sr.get('seasons',[]))}\n\nWhat do you want to do?",
         reply_markup=InlineKeyboardMarkup([
@@ -234,6 +240,7 @@ async def ess_ep_sub(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                            ("1080p",cur.get("1080p",""))] if v}
     seasons = ctx.user_data["edit_series"].setdefault("seasons",[])
     _ep_save(seasons, sn, epn, lnk, subs)
+    ctx.user_data.setdefault("session_episodes", []).append((sn, epn))
     total_eps = sum(len(s["episodes"]) for s in seasons)
     ctx.user_data["cur_ep"] = {}
     sub_info  = ", ".join(subs.keys()) if subs else "none"
@@ -254,6 +261,8 @@ async def ess_ep_more_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     sr        = ctx.user_data["edit_series"]; seasons = sr["seasons"]
     total_eps = sum(len(s["episodes"]) for s in seasons)
     summary   = "\n".join(f"  S{s['season_number']}: {len(s['episodes'])} ep(s)" for s in seasons)
+    session_episodes     = ctx.user_data.get("session_episodes", [])
+    orig_season_numbers  = ctx.user_data.get("orig_season_numbers", set())
     await q.edit_message_text("⏳ <i>Saving…</i>", parse_mode=ParseMode.HTML)
     r = await api_post("/api/series", sr)   # backend uses POST as upsert
     ctx.user_data.clear()
@@ -275,5 +284,7 @@ async def ess_ep_more_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         item["genres"]   = info.get("genres", [])
         item["overview"] = info.get("overview", "")
         poster_url = poster(info)
-    item["episode_line"] = summary.strip().replace("\n", " · ")
+    episode_line, is_new_season = _session_upload_summary(session_episodes, orig_season_numbers)
+    item["episode_line"] = episode_line or summary.strip().replace("\n", " · ")
+    item["event_label"]  = "New Season Added" if is_new_season else "New Episode(s) Added"
     return await start_notify_flow(update, ctx, kind="episode", item=item, poster_url=poster_url)

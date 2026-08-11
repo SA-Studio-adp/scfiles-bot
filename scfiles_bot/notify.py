@@ -44,9 +44,12 @@ import aiohttp
 from utils import esc as _esc
 
 try:
-    from messages import TEMPLATES as _TEMPLATES, PROMO_LINK as _PROMO_LINK, PROMO_BUTTON_TEXT as _PROMO_BUTTON_TEXT
+    from messages import (TEMPLATES as _TEMPLATES, WEBSITE_LINK as _WEBSITE_LINK,
+                          CHANNEL_HANDLE as _CHANNEL_HANDLE, REQUESTS_HANDLES as _REQUESTS_HANDLES,
+                          WATCH_BUTTON_PREFIX as _WATCH_BUTTON_PREFIX)
 except ImportError:
-    _TEMPLATES, _PROMO_LINK, _PROMO_BUTTON_TEXT = {}, "https://t.me/", "🔔 Join our Channel"
+    _TEMPLATES, _WEBSITE_LINK = {}, "https://yourwebsite.com"
+    _CHANNEL_HANDLE, _REQUESTS_HANDLES, _WATCH_BUTTON_PREFIX = "", "", "Watch . "
 
 logger = logging.getLogger("scfiles-bot.notify")
 
@@ -166,10 +169,35 @@ def _genre_line(genres) -> str:
     names = [g.get("name", "") if isinstance(g, dict) else str(g) for g in genres]
     return " / ".join(n for n in names if n)
 
-def _promo_button() -> dict:
-    """Inline keyboard with the 'Join our channel' button, attached below
-    the message regardless of parse_mode."""
-    return {"inline_keyboard": [[{"text": _PROMO_BUTTON_TEXT, "url": _PROMO_LINK}]]}
+# ── slug / watch-button / footer ──────────────────────────────────────────
+_URL_PATH = {"movie": "movie", "series": "series", "episode": "series", "collection": "collections"}
+
+def _slug_id(kind: str, item: dict) -> str:
+    """The slug used when the item was originally uploaded — collections
+    store it as col_id, movies/series (and new-episode updates, which
+    carry the parent series' dict) store it as id."""
+    if kind == "collection":
+        return str(item.get("col_id") or item.get("id", ""))
+    return str(item.get("id", ""))
+
+def watch_url(kind: str, item: dict) -> str:
+    path = _URL_PATH.get(kind, "movie")
+    slug = _slug_id(kind, item)
+    return f"{_WEBSITE_LINK.rstrip('/')}/{path}?id={slug}"
+
+def _watch_button(kind: str, item: dict, title: str) -> dict:
+    """Inline keyboard with the 'Watch . <name>' button linking to the
+    website, attached below every notification regardless of parse_mode."""
+    return {"inline_keyboard": [[{"text": f"{_WATCH_BUTTON_PREFIX}{title}", "url": watch_url(kind, item)}]]}
+
+def _footer() -> str:
+    raw = _TEMPLATES.get("FOOTER", "")
+    try:
+        return raw.format(channel_handle=_CHANNEL_HANDLE, requests_handles=_REQUESTS_HANDLES,
+                          website_link=_WEBSITE_LINK)
+    except Exception:
+        logger.exception("FOOTER template format failed")
+        return ""
 
 def build_context(kind: str, item: dict, title_override: str = None):
     """Returns (template_key, format_dict). `item` should already carry
@@ -197,6 +225,7 @@ def build_context(kind: str, item: dict, title_override: str = None):
         template_key = "EPISODE_UPDATE"
         ctx = {
             "title":        _esc(title),
+            "event_label":  _esc(item.get("event_label", "New Episode(s) Added")),
             "episode_line": _esc(item.get("episode_line", "")),
             "year":         _esc(item.get("year", "")),
             "genre":        _esc(item.get("genre") or _genre_line(item.get("genres"))),
@@ -257,11 +286,13 @@ async def notify_upload(kind: str, item: dict, poster_url: str = None, category:
         logger.exception("Template format failed for %s", template_key)
         return 0
 
-    text = (_embed_image_html(poster_url) if poster_url else "") + body
+    display_title = title_override or item.get("title") or item.get("id", "?")
+    text = (_embed_image_html(poster_url) if poster_url else "") + body + _footer()
     link_preview_options = (
         {"url": poster_url, "prefer_large_media": True, "show_above_text": True}
         if poster_url else {"is_disabled": True}
     )
+    button = _watch_button(kind, item, display_title)
 
     close_session = False
     if session is None:
@@ -274,7 +305,7 @@ async def notify_upload(kind: str, item: dict, poster_url: str = None, category:
                 "chat_id": chat_id, "text": text, "parse_mode": "HTML",
                 "disable_web_page_preview": not bool(poster_url),
                 "link_preview_options": link_preview_options,
-                "reply_markup": _promo_button(),
+                "reply_markup": button,
             })
             if r and r.get("ok"):
                 sent += 1
@@ -282,6 +313,6 @@ async def notify_upload(kind: str, item: dict, poster_url: str = None, category:
         if close_session:
             await session.close()
 
-    log_upload(kind, title_override or item.get("title") or item.get("id", "?"), category)
+    log_upload(kind, display_title, category)
     return sent
 

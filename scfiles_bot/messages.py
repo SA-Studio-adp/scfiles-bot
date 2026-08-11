@@ -4,26 +4,33 @@ messages.py — SCFiles channel-notification templates
 Edit the strings below to change what gets posted. No other file needs to
 change — notify.py and notify_bot.py both import from here.
 
+For the FULL list of HTML formatting tags available (bold, italic,
+underline, strikethrough, quotes, code blocks, spoilers, etc) see
+formats.md in this same folder — it's a copy-paste reference.
+
 Each upload is ONE Telegram message (parse_mode=HTML). When there's a
 poster, notify.py prepends an invisible link to it so Telegram shows it as
-a large image preview above this text — you don't need to (and can't)
-reference the image from inside these templates; just write the text that
-goes below/alongside it. A "Join our channel" BUTTON is attached under
-every message automatically (not part of these templates either).
+a large image preview above this text — you don't reference the image from
+inside these templates. A FOOTER (below) is appended after every template,
+and a "Watch · <name>" BUTTON linking to the website is attached under
+every message — neither is part of the per-type templates, so you only
+edit them once here.
 
-Syntax: Telegram Bot API HTML — https://core.telegram.org/bots/api#html-style
-  <b>bold</b>   <i>italic</i>   <code>code</code>   <a href="url">text</a>
 Only & < > need escaping in HTML, and placeholders in {curly_braces} below
 are already escaped before being inserted (title, overview, year, genre,
-season_line, movie_count) — don't escape them again here. Plain text with
-no tags at all is perfectly valid too.
-
-PROMO_LINK / PROMO_BUTTON_TEXT control the "Join our channel" button
-attached under every upload notification.
+episode_line, event_label, movie_count) — don't escape them again here.
 """
 
-PROMO_LINK = "https://t.me/your_channel"
-PROMO_BUTTON_TEXT = "🔔 Join our Channel"
+# Used to build every "Watch · <name>" button below, AND mentioned in the
+# footer's "For more visit" line:
+#   movie      -> {WEBSITE_LINK}/movie?id=<slug>
+#   series     -> {WEBSITE_LINK}/series?id=<slug>
+#   collection -> {WEBSITE_LINK}/collections?id=<slug>
+WEBSITE_LINK = "https://yourwebsite.com"
+
+CHANNEL_HANDLE    = "@sc_files4"
+REQUESTS_HANDLES  = "@sc_requests & @streamcenter_bot"
+WATCH_BUTTON_PREFIX = "Watch . "   # button label = this + the movie/series/collection name
 
 TEMPLATES = {
 
@@ -39,9 +46,10 @@ TEMPLATES = {
         '"{overview}"'
     ),
 
-    # new episode(s) added to an existing series
+    # new episode(s) added to an existing series — {event_label} is filled
+    # in automatically as "New Season Added" or "New Episode(s) Added"
     "EPISODE_UPDATE": (
-        '📺 <b>"{title}"</b> — New Episode!\n\n'
+        '📺 <b>"{title}"</b> — {event_label}!\n\n'
         "🆕 {episode_line}\n"
         "📅 {year}  •  🎭 {genre}\n\n"
         '"{overview}"'
@@ -50,6 +58,13 @@ TEMPLATES = {
     "COLLECTION": (
         '🗂 <b>"{title}" Collection</b>\n\n'
         "🎬 {movie_count} movies inside"
+    ),
+
+    # Appended after every one of the templates above.
+    "FOOTER": (
+        "\n\nJoin our Channel :- {channel_handle}\n"
+        "To Get Direct Files Use : {requests_handles}\n\n"
+        "For more visit :- {website_link}"
     ),
 
     # ── notify-bot commands (sent by the SAME bot that posts uploads) ────

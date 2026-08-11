@@ -51,6 +51,35 @@ def _series_summary(seasons: list) -> str:
     lines = [f"  S{s['season_number']}: {len(s['episodes'])} ep(s)" for s in seasons]
     return f"📊 {len(seasons)} season(s) · {total} episode(s)\n" + "\n".join(lines)
 
+def _format_ep_ranges(ep_numbers) -> str:
+    """[13,14,15,16,20] -> '13-16, 20'. Single number stays bare ('5')."""
+    nums = sorted(set(ep_numbers))
+    if not nums:
+        return ""
+    ranges, start = [], nums[0]
+    prev = start
+    for n in nums[1:]:
+        if n == prev + 1:
+            prev = n
+            continue
+        ranges.append((start, prev))
+        start = prev = n
+    ranges.append((start, prev))
+    return ", ".join(f"{a}-{b}" if a != b else f"{a}" for a, b in ranges)
+
+def _session_upload_summary(session_episodes, orig_season_numbers):
+    """Turns the (season, episode) pairs touched during an /editseries
+    session into ("S1 . EP 13-16 has been uploaded" per touched season,
+    joined by newline, is_new_season). Falls back to an empty line/False if
+    nothing was tracked (shouldn't normally happen)."""
+    by_season = {}
+    for sn, epn in session_episodes:
+        by_season.setdefault(sn, []).append(epn)
+    is_new_season = any(sn not in orig_season_numbers for sn in by_season)
+    lines = [f"S{sn} . EP {_format_ep_ranges(eps)} has been uploaded"
+              for sn, eps in sorted(by_season.items())]
+    return "\n".join(lines), is_new_season
+
 
 
 def _link_input(t: str, current: str) -> str:

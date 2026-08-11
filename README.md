@@ -30,6 +30,7 @@ scfiles_bot/
 ├── notify.py                        ← channel-notification engine (routing, sending, upload history)
 ├── notify_bot.py                     ← second Application (NOTIFY_BOT_TOKEN): /start, /uploads
 ├── messages.py                        ← EDIT THIS to restyle every notification/command message
+├── formats.md                          ← HTML formatting reference for messages.py (bold, italic, etc)
 │
 ├── handlers/
 │   ├── states.py             ← every ConversationHandler state constant
@@ -93,17 +94,33 @@ get every upload; "PreDVD"/"HD" channels only get uploads sent to that
 category.
 
 **Sending a notification:** after any successful `/addmovie`, `/addseries`,
-`/addcollection`, or a saved `/editseries` (new episode), the bot asks:
-"Send a notification?" → pick a category → enter a title → confirm. The
-notify bot then posts ONE `sendMessage` (HTML parse mode): title, year,
-genre, and the TMDB overview (quoted), with the TMDB poster embedded as a
-large link-preview image above the text via the classic invisible-anchor
-trick (`<a href="poster_url">&#8205;</a>` + `link_preview_options`) — no
-`sendPhoto` call, so there's no 1024-char caption limit either. A
-**"🔔 Join our Channel" button** is attached below.
+`/addcollection`, or a saved `/editseries` (new episode/season), the bot
+asks: "Send a notification?" → pick a category → enter a title → confirm.
+The notify bot then posts ONE `sendMessage` (HTML parse mode): title,
+year, genre, and the TMDB overview (quoted), with the TMDB poster embedded
+as a large link-preview image above the text via the classic
+invisible-anchor trick (`<a href="poster_url">&#8205;</a>` +
+`link_preview_options`) — no `sendPhoto` call, so there's no 1024-char
+caption limit either. A fixed **footer** (channel handle, request-bot
+handles, website link — edit in `messages.py`'s `FOOTER` template) is
+appended, and a **"Watch · &lt;name&gt;" button** linking to your website
+is attached below, built from the item's slug ID:
+- movie → `WEBSITE_LINK/movie?id=<slug>`
+- series/episode update → `WEBSITE_LINK/series?id=<slug>`
+- collection → `WEBSITE_LINK/collections?id=<slug>`
+
+**New season / new episode wording:** when `/editseries` saves, the bot
+tracks exactly which (season, episode) pairs were touched in that session.
+If any of them belong to a season that didn't exist before, the
+notification says "New Season Added"; otherwise "New Episode(s) Added",
+followed by a per-season line like `S1 . EP 13-16 has been uploaded`
+(contiguous episode numbers collapse into a range automatically).
 
 Wording lives in `scfiles_bot/messages.py` as one HTML template per content
-type, plus `PROMO_LINK` / `PROMO_BUTTON_TEXT` for the button.
+type, plus `WEBSITE_LINK` / `CHANNEL_HANDLE` / `REQUESTS_HANDLES` /
+`WATCH_BUTTON_PREFIX` at the top of the file. Full HTML formatting
+reference (bold, italic, underline, quote blocks, spoilers, etc) is in
+`scfiles_bot/formats.md`.
 
 `/removechannel <predvd|hd|all> <chat_id>` and `/listchannels` manage the
 registered list.
