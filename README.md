@@ -89,13 +89,15 @@ uploads sent to that category.
 **Sending a notification:** after any successful `/addmovie`, `/addseries`,
 `/addcollection`, or a saved `/editseries` (new episode), the bot asks:
 "Send a notification?" → pick a category → enter a title → confirm. The
-notify bot then posts ONE message: the TMDB poster with title (quoted),
-year, genre, and the TMDB overview (quoted) as its caption, plus a
-**"🔔 Join our Channel" button** attached below (a real button, not a text
-link inside the caption).
+notify bot then posts ONE `sendMessage` (HTML parse mode): title, year,
+genre, and the TMDB overview (quoted), with the TMDB poster embedded as a
+large link-preview image above the text via the classic invisible-anchor
+trick (`<a href="poster_url">&#8205;</a>` + `link_preview_options`) — no
+`sendPhoto` call, so there's no 1024-char caption limit either. A
+**"🔔 Join our Channel" button** is attached below.
 
-Wording lives in `scfiles_bot/messages.py` as one template per content type,
-plus `PROMO_LINK` / `PROMO_BUTTON_TEXT` for the button.
+Wording lives in `scfiles_bot/messages.py` as one HTML template per content
+type, plus `PROMO_LINK` / `PROMO_BUTTON_TEXT` for the button.
 
 `/removechannel <predvd|hd|all> <chat_id>` and `/listchannels` manage the
 registered list.

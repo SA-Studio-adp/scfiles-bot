@@ -1,10 +1,21 @@
 """
 notify.py — SCFiles channel-notification engine
 ─────────────────────────────────────────────────────────────────────────────
-Posts a TMDB portrait poster + MarkdownV2 caption to your channels/groups
-whenever an admin chooses to notify about a movie/series/collection/new
-episode — using a SEPARATE bot token (NOTIFY_BOT_TOKEN) so your admin bot
-and your public "poster" bot are different bots.
+Posts a TMDB portrait poster + HTML-formatted caption to your channels/
+groups whenever an admin chooses to notify about a movie/series/
+collection/new episode — using a SEPARATE bot token (NOTIFY_BOT_TOKEN) so
+your admin bot and your public "poster" bot are different bots.
+
+The poster is embedded WITHOUT sendPhoto — it's a single sendMessage whose
+text starts with an invisible zero-width-joiner link
+(`<a href="POSTER_URL">&#8205;</a>`), which makes Telegram fetch and show
+POSTER_URL as the message's link-preview image, with the actual caption
+text right below it, and nothing visible for the anchor itself. This keeps
+the poster + title + details + button all as ONE message, and (unlike
+sendPhoto's 1024-char caption cap) sendMessage allows up to 4096 chars.
+`link_preview_options` (Bot API 7.0+) is also set for the same URL with
+prefer_large_media/show_above_text, for clients that support it; the
+invisible-anchor trick is what makes it work everywhere else.
 
 Flow (see handlers/notify_flow.py for the conversation states)
 ────────────────────────────────────────────────────────────
@@ -25,10 +36,12 @@ Public API
   await verify_notify_bot_in_chat(chat_id)
   log_upload(...) / load_recent_uploads(n)
 """
-import json, logging, os, re
+import json, logging, os
 from datetime import datetime
 
 import aiohttp
+
+from utils import esc as _esc
 
 try:
     from messages import TEMPLATES as _TEMPLATES, PROMO_LINK as _PROMO_LINK, PROMO_BUTTON_TEXT as _PROMO_BUTTON_TEXT
@@ -126,12 +139,19 @@ def load_recent_uploads(n: int = 10) -> list:
         logger.exception("Failed to read %s", UPLOADS_LOG_FILE)
         return []
 
-# ── MarkdownV2 escaping (per Telegram Bot API) ────────────────────────────
-_MDV2_SPECIAL = r"_*[]()~`>#+-=|{}.!"
-
+# ── HTML escaping (parse_mode=HTML everywhere in this module) ────────────
 def md_escape(v) -> str:
-    s = str(v if v is not None else "")
-    return re.sub(f"([{re.escape(_MDV2_SPECIAL)}])", r"\\\1", s)
+    """Kept as an alias (some deployments may still import this name) —
+    now escapes for HTML, since that's the parse_mode this module uses."""
+    return _esc(v)
+
+def _embed_image_html(url: str) -> str:
+    """The invisible-anchor trick: an <a> tag around a zero-width-joiner
+    character. Telegram fetches `url` for the message's link-preview image
+    (with link_preview_options steering size/position below), while the
+    anchor itself renders nothing visible in the message text."""
+    safe_url = str(url).replace("&", "&amp;").replace('"', "&quot;")
+    return f'<a href="{safe_url}">&#8205;</a>'
 
 # ── routing ────────────────────────────────────────────────────────────────
 def _categories_for_selection(selected: str) -> list:
@@ -147,46 +167,46 @@ def _genre_line(genres) -> str:
     return " / ".join(n for n in names if n)
 
 def _promo_button() -> dict:
-    """Inline keyboard with the 'Join our channel' button. A button, not a
-    text link, because markdown links inside photo captions render
-    unreliably across Telegram clients — buttons always work."""
+    """Inline keyboard with the 'Join our channel' button, attached below
+    the message regardless of parse_mode."""
     return {"inline_keyboard": [[{"text": _PROMO_BUTTON_TEXT, "url": _PROMO_LINK}]]}
 
 def build_context(kind: str, item: dict, title_override: str = None):
     """Returns (template_key, format_dict). `item` should already carry
     TMDB-enriched fields: title, year, overview, genres (list) or genre
-    (str), and movie_count for collections."""
+    (str), and movie_count for collections. Values are HTML-escaped here —
+    messages.py templates are plain text / basic HTML tags, not MarkdownV2."""
     title = title_override or item.get("title") or item.get("id", "?")
     if kind == "movie":
         template_key = "MOVIE"
         ctx = {
-            "title":    md_escape(title),
-            "year":     md_escape(item.get("year", "")),
-            "genre":    md_escape(item.get("genre") or _genre_line(item.get("genres"))),
-            "overview": md_escape((item.get("overview") or "")[:600]),
+            "title":    _esc(title),
+            "year":     _esc(item.get("year", "")),
+            "genre":    _esc(item.get("genre") or _genre_line(item.get("genres"))),
+            "overview": _esc((item.get("overview") or "")[:900]),
         }
     elif kind == "series":
         template_key = "SERIES"
         ctx = {
-            "title":    md_escape(title),
-            "year":     md_escape(item.get("year", "")),
-            "genre":    md_escape(item.get("genre") or _genre_line(item.get("genres"))),
-            "overview": md_escape((item.get("overview") or "")[:600]),
+            "title":    _esc(title),
+            "year":     _esc(item.get("year", "")),
+            "genre":    _esc(item.get("genre") or _genre_line(item.get("genres"))),
+            "overview": _esc((item.get("overview") or "")[:900]),
         }
     elif kind == "episode":
         template_key = "EPISODE_UPDATE"
         ctx = {
-            "title":        md_escape(title),
-            "episode_line": md_escape(item.get("episode_line", "")),
-            "year":         md_escape(item.get("year", "")),
-            "genre":        md_escape(item.get("genre") or _genre_line(item.get("genres"))),
-            "overview":     md_escape((item.get("overview") or "")[:600]),
+            "title":        _esc(title),
+            "episode_line": _esc(item.get("episode_line", "")),
+            "year":         _esc(item.get("year", "")),
+            "genre":        _esc(item.get("genre") or _genre_line(item.get("genres"))),
+            "overview":     _esc((item.get("overview") or "")[:900]),
         }
     else:  # collection
         template_key = "COLLECTION"
         ctx = {
-            "title":       md_escape(title),
-            "movie_count": md_escape(len(item.get("movies", []))),
+            "title":       _esc(title),
+            "movie_count": _esc(len(item.get("movies", []))),
         }
     return template_key, ctx
 
@@ -211,8 +231,10 @@ async def notify_upload(kind: str, item: dict, poster_url: str = None, category:
     """Sends the notification and logs it. Returns the number of chats it
     was sent to (0 if NOTIFY_BOT_TOKEN is unset or no channels match).
 
-    ONE message per channel: the poster with the whole template as its
-    caption underneath, plus a "Join our channel" button attached."""
+    ONE sendMessage per channel: if there's a poster, an invisible anchor
+    tag embeds it as the message's link-preview image (see _embed_image_html
+    docstring above) so it renders like an attached photo without a
+    separate sendPhoto call — title/details/button all stay in one message."""
     if not NOTIFY_BOT_TOKEN:
         return 0
     channels  = load_channels()
@@ -230,10 +252,16 @@ async def notify_upload(kind: str, item: dict, poster_url: str = None, category:
         logger.error("Missing template %s in messages.py", template_key)
         return 0
     try:
-        caption = raw.format(**ctx)
+        body = raw.format(**ctx)
     except Exception:
         logger.exception("Template format failed for %s", template_key)
         return 0
+
+    text = (_embed_image_html(poster_url) if poster_url else "") + body
+    link_preview_options = (
+        {"url": poster_url, "prefer_large_media": True, "show_above_text": True}
+        if poster_url else {"is_disabled": True}
+    )
 
     close_session = False
     if session is None:
@@ -242,17 +270,12 @@ async def notify_upload(kind: str, item: dict, poster_url: str = None, category:
     sent = 0
     try:
         for chat_id in chat_ids:
-            if poster_url:
-                r = await _tg_call(session, "sendPhoto", {
-                    "chat_id": chat_id, "photo": poster_url,
-                    "caption": caption, "parse_mode": "MarkdownV2",
-                    "reply_markup": _promo_button(),
-                })
-            else:
-                r = await _tg_call(session, "sendMessage", {
-                    "chat_id": chat_id, "text": caption, "parse_mode": "MarkdownV2",
-                    "disable_web_page_preview": True, "reply_markup": _promo_button(),
-                })
+            r = await _tg_call(session, "sendMessage", {
+                "chat_id": chat_id, "text": text, "parse_mode": "HTML",
+                "disable_web_page_preview": not bool(poster_url),
+                "link_preview_options": link_preview_options,
+                "reply_markup": _promo_button(),
+            })
             if r and r.get("ok"):
                 sent += 1
     finally:
@@ -261,3 +284,4 @@ async def notify_upload(kind: str, item: dict, poster_url: str = None, category:
 
     log_upload(kind, title_override or item.get("title") or item.get("id", "?"), category)
     return sent
+

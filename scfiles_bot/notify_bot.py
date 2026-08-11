@@ -14,6 +14,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 from telegram.constants import ParseMode
 
 from config import logger
+from utils import esc
 import notify
 
 try:
@@ -31,7 +32,7 @@ def _promo_kb() -> InlineKeyboardMarkup:
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        _fmt("BOT_START"), parse_mode=ParseMode.MARKDOWN_V2,
+        _fmt("BOT_START"), parse_mode=ParseMode.HTML,
         disable_web_page_preview=True, reply_markup=_promo_kb())
 
 
@@ -52,18 +53,18 @@ def _relative_time(iso_ts: str) -> str:
 async def cmd_uploads(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     entries = notify.load_recent_uploads(10)
     if not entries:
-        await update.message.reply_text(_fmt("BOT_UPLOADS_EMPTY"), parse_mode=ParseMode.MARKDOWN_V2)
+        await update.message.reply_text(_fmt("BOT_UPLOADS_EMPTY"), parse_mode=ParseMode.HTML)
         return
     lines = [_fmt("BOT_UPLOADS_HEADER", count=len(entries))]
     for e in entries:
         lines.append(_fmt(
             "BOT_UPLOADS_ITEM",
             icon=notify.KIND_ICON.get(e.get("kind", ""), "•"),
-            title=notify.md_escape(e.get("title", "?")),
+            title=esc(e.get("title", "?")),
             category_label=notify.CATEGORY_LABEL.get(e.get("category", ""), e.get("category", "")),
-            when=notify.md_escape(_relative_time(e.get("ts", ""))),
+            when=esc(_relative_time(e.get("ts", ""))),
         ))
-    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN_V2,
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML,
                                     disable_web_page_preview=True)
 
 
