@@ -35,15 +35,15 @@ WATCH_BUTTON_PREFIX = "Watch  •  "   # button label = this + the movie/series/
 TEMPLATES = {
 
     "MOVIE": (
-        '🎬 <b>"{title}"</b>\n\n'
-        "📅 {year}  •  🎭 {genre}\n\n"
-        '"{overview}"'
+        '<blockquote>🎬 <b>{title}</b></blockquote>\n\n'
+        "<blockquote>📅 {year}  •  🎭 {genre}</blockquote>\n\n"
+        '<blockquote><i>{overview}</i></blockquote>'
     ),
 
     "SERIES": (
-        '📺 <b>"{title}"</b>\n\n'
-        "📅 {year}  •  🎭 {genre}\n\n"
-        '"{overview}"'
+        '<blockquote>📺 <b>{title}</blockquote></b>\n\n'
+        "<blockquote>📅 {year}  •  🎭 {genre}</blockquote>\n\n"
+        '<blockquote><i>{overview}</i></blockquote>'
     ),
 
     # new episode(s) added to an existing series — {event_label} is filled
@@ -62,9 +62,9 @@ TEMPLATES = {
 
     # Appended after every one of the templates above.
     "FOOTER": (
-        "\n\nJoin our Channel :- {channel_handle}\n"
+        "\n\n<b>Join our Channel :- {channel_handle}\n"
         "To Get Direct Files Use : {requests_handles}\n\n"
-        "For more visit :- {website_link}"
+        "For more visit :- {website_link}</b>"
     ),
 
     # ── notify-bot commands (sent by the SAME bot that posts uploads) ────
