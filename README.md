@@ -73,18 +73,24 @@ instead of waiting for it to crash in production.
 ## v5: channel notifications
 
 Two bots are involved:
-- **Admin bot** (`TELEGRAM_TOKEN`) — you talk to this one; it runs all the
-  `/add*` `/edit*` `/del*` commands.
+- **Admin bot** (`TELEGRAM_TOKEN`) — you talk to this one, in DM; it runs
+  all the `/add*` `/edit*` `/del*` commands. It never needs to be added to
+  any channel or group.
 - **Notify bot** (`NOTIFY_BOT_TOKEN`) — a separate bot that only posts
   uploads to your channels and answers `/start` and `/uploads` there. Add
-  it to your channels/groups as admin too.
+  **this one** as admin to every channel/group you want notifications in —
+  the admin bot doesn't need to be there too.
 
-**Register a channel:** run `/addchannel` with the ADMIN bot, inside the
-target channel/group (or in a DM with the chat ID as an argument). It
-verifies the chat is actually a channel/group — not a person's DM — before
-letting you pick a category: **📀 PreDVD / 🎬 HD / 🌐 All**. Channels
-registered under "All" get every upload; "PreDVD"/"HD" channels only get
-uploads sent to that category.
+**Register a channel:** in a DM with the ADMIN bot, either:
+- `/addchannel -1001234567890` if you already know the chat ID, or
+- forward any message from the target channel/group into the DM — no
+  command needed, Telegram hands over the chat ID from the forward itself
+
+Either way, it's verified via the **notify bot's** own access to that chat
+(so the notify bot must already be admin there) before letting you pick a
+category: **📀 PreDVD / 🎬 HD / 🌐 All**. Channels registered under "All"
+get every upload; "PreDVD"/"HD" channels only get uploads sent to that
+category.
 
 **Sending a notification:** after any successful `/addmovie`, `/addseries`,
 `/addcollection`, or a saved `/editseries` (new episode), the bot asks:

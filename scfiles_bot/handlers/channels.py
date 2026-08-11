@@ -15,8 +15,14 @@ def _channel_category_kb(chat_id) -> InlineKeyboardMarkup:
     ], [InlineKeyboardButton("❌ Cancel", callback_data="chnl_cancel")]])
 
 async def cmd_addchannel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Run this INSIDE the target channel/group (bot must be an admin there),
-    or in a DM with the chat id as an argument: /addchannel -1001234567890"""
+    """Registers a channel/group for notifications. The ADMIN bot never
+    needs to be a member anywhere — only the NOTIFY bot does (it's the one
+    that actually posts). Two ways to point this at a chat:
+      1. /addchannel -1001234567890   (if you already know the chat ID)
+      2. Forward any message FROM the target channel/group into this DM —
+         no command needed at all, see handle_forwarded_message() below.
+    Either way, the target chat is then verified via the NOTIFY bot's own
+    getChat — so the notify bot must already be an admin there."""
     if not is_admin(update.effective_user.id):
         return await update.message.reply_text("⛔ <b>Access denied.</b>", parse_mode=ParseMode.HTML)
 
@@ -25,39 +31,69 @@ async def cmd_addchannel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             chat_id = int(ctx.args[0].strip())
         except ValueError:
             return await update.message.reply_text("❌ Invalid chat ID.", parse_mode=ParseMode.HTML)
-        # We're not in the chat right now — ask the ADMIN bot to look it up.
-        # This also doubles as proof the admin bot is actually a member.
-        try:
-            chat = await ctx.bot.get_chat(chat_id)
-            chat_type, chat_title = chat.type, (chat.title or "")
-        except Exception as e:
-            return await update.message.reply_text(
-                f"❌ Couldn't look up {code(chat_id)} — is the admin bot a member of it?\n"
-                f"<code>{esc(e)}</code>", parse_mode=ParseMode.HTML)
-    else:
-        chat_id, chat_type, chat_title = (update.effective_chat.id, update.effective_chat.type,
-                                          update.effective_chat.title or "")
+        return await _register_channel_flow(update, ctx, chat_id)
 
+    fwd_chat = _forwarded_chat(update.message)
+    if fwd_chat:
+        return await _register_channel_flow(update, ctx, fwd_chat.id, fwd_chat.title or "")
+
+    await update.message.reply_text(
+        "📡 <b>Register a channel/group</b>\n\n"
+        "The admin bot doesn't need to be added anywhere for this — only the "
+        "<b>notify bot</b> does (as admin, in the target chat).\n\n"
+        "Then either:\n"
+        f"• Send {code('/addchannel -1001234567890')} with its chat ID, or\n"
+        "• Forward any message FROM that channel/group here (no command needed, just forward it)",
+        parse_mode=ParseMode.HTML)
+
+
+async def handle_forwarded_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """An admin forwarding any message from a channel/group into this DM —
+    with no /addchannel command at all — starts the same registration flow.
+    Silently ignored for non-admins and non-forwarded messages."""
+    if not update.effective_user or not is_admin(update.effective_user.id):
+        return
+    fwd_chat = _forwarded_chat(update.message)
+    if not fwd_chat:
+        return
+    await _register_channel_flow(update, ctx, fwd_chat.id, fwd_chat.title or "")
+
+
+async def _register_channel_flow(update: Update, ctx: ContextTypes.DEFAULT_TYPE,
+                                  chat_id: int, chat_title: str = ""):
+    """Shared by cmd_addchannel and handle_forwarded_message — verifies the
+    chat via the NOTIFY bot only and shows the category picker."""
+    info = await notify.verify_notify_bot_in_chat(chat_id)
+    if info is None:
+        return await update.message.reply_text(
+            f"❌ <b>Couldn't verify {code(chat_id)} via the notify bot.</b>\n"
+            "Make sure the <b>notify bot</b> (not this admin bot) has been added there as "
+            "admin, then try again.", parse_mode=ParseMode.HTML)
+
+    chat_type = info.get("type")
+    chat_title = chat_title or info.get("title", "")
     if chat_type == "private":
         return await update.message.reply_text(
-            "❌ <b>That's a person's chat, not a channel or group.</b>\n"
-            "Run /addchannel inside the target channel/group instead — or in a DM with its "
-            "chat ID as an argument, e.g. <code>/addchannel -1001234567890</code>.",
+            "❌ <b>That's a person's chat, not a channel or group.</b>",
             parse_mode=ParseMode.HTML)
 
     ctx.user_data["pending_channel"] = {"chat_id": chat_id, "title": chat_title}
-
-    warn = ""
-    notify_check = await notify.verify_notify_bot_in_chat(chat_id)
-    if notify_check is None:
-        warn = ("\n\n⚠️ <i>The notify bot doesn't seem to be in this chat yet — add it too "
-                "(as admin), or notifications won't be able to send here.</i>")
-
     await update.message.reply_text(
         f"📡 <b>Register this {esc(chat_type)}</b>\n🆔 {code(chat_id)}"
         f"{'  ·  ' + esc(chat_title) if chat_title else ''}\n\n"
-        f"What kind of uploads should be posted here?{warn}",
+        f"What kind of uploads should be posted here?",
         reply_markup=_channel_category_kb(chat_id), parse_mode=ParseMode.HTML)
+
+def _forwarded_chat(message):
+    """Returns the source Chat of a forwarded message, or None. Handles
+    both the modern MessageOrigin API (Bot API 7.0+) and the legacy
+    forward_from_chat field, whichever the running PTB/Bot API version
+    populates."""
+    fwd_chat = getattr(message, "forward_from_chat", None)
+    if fwd_chat:
+        return fwd_chat
+    origin = getattr(message, "forward_origin", None)
+    return getattr(origin, "chat", None) if origin else None
 
 async def channel_category_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
@@ -101,7 +137,8 @@ async def cmd_listchannels(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     channels = notify.list_channels()
     if not channels:
         return await update.message.reply_text(
-            "📭 No channels registered yet.\n<i>Use /addchannel inside a channel to register it.</i>",
+            "📭 No channels registered yet.\n<i>Use /addchannel, or just forward a message "
+            "from the target channel/group here.</i>",
             parse_mode=ParseMode.HTML)
     lines = []
     for cat in notify.CATEGORIES:

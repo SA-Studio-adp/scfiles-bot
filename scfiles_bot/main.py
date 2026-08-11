@@ -262,6 +262,11 @@ async def main():
     app.add_handler(CallbackQueryHandler(h_delete.del_confirm_cb,    pattern="^delconfirm_"))
     app.add_handler(CallbackQueryHandler(h_delete.del_cancel_cb,     pattern="^delcancel"))
     app.add_handler(CallbackQueryHandler(h_channels.channel_category_cb, pattern="^chnl_"))
+    # Forwarding a message from a channel/group into a DM (no command) also
+    # starts channel registration — see handlers/channels.py.
+    app.add_handler(MessageHandler(
+        filters.FORWARDED & filters.ChatType.PRIVATE & ~filters.COMMAND,
+        h_channels.handle_forwarded_message))
 
     # ── scheduler ─────────────────────────────────────────────────────────
     scheduler = AsyncIOScheduler(timezone=IST)

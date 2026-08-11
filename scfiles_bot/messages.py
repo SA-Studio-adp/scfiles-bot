@@ -22,7 +22,7 @@ PROMO_LINK / PROMO_BUTTON_TEXT control the "Join our channel" button
 attached under every upload notification.
 """
 
-PROMO_LINK = "https://t.me/sc_files4"
+PROMO_LINK = "https://t.me/your_channel"
 PROMO_BUTTON_TEXT = "🔔 Join our Channel"
 
 TEMPLATES = {
