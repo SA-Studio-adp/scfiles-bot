@@ -45,6 +45,15 @@ overview, year, genre, episode_line, event_label, movie_count) — the bot
 already escapes those values before inserting them, so typing a raw `&` or
 `<` inside a template's own wording is the only thing you need to watch.
 
+> **`CHANNEL_HANDLE` / `REQUESTS_HANDLES` / `WEBSITE_LINK`** (top of
+> messages.py) are also auto-escaped before being inserted into the
+> footer — but if you reuse them anywhere else, or add new constants like
+> them, remember: a stray `&` in ANY text sent with `parse_mode=HTML`
+> makes Telegram reject the **entire message** with a 400 "can't parse
+> entities" error — silently, from the notify bot's side, unless
+> something is watching for it. `tests/test_html_safety.py` checks every
+> template for exactly this before you deploy.
+
 ## What you CANNOT do
 
 - Put text *above* an image in the same message — that's why the poster

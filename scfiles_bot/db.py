@@ -17,7 +17,7 @@ Env vars
 ────────
   MONGODB_URI  — full connection string, e.g.
                  mongodb+srv://user:pass@cluster.mongodb.net
-  MONGODB_DB   — database name (default: scfiles_bot)
+  MONGODB_DB   — database name (default: scfiles_admin_bot)
 
 Collections used (created automatically on first write, no manual setup
 needed — just an empty/existing MongoDB database):
@@ -37,7 +37,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 logger = logging.getLogger("scfiles-bot.db")
 
 MONGODB_URI = os.environ.get("MONGODB_URI", "").strip()
-MONGODB_DB  = os.environ.get("MONGODB_DB", "scfiles_bot").strip()
+MONGODB_DB  = os.environ.get("MONGODB_DB", "scfiles_admin_bot").strip()
 
 UPLOADS_LOG_MAX = 500   # backup.py dumps up to this many; /uploads shows 10
 

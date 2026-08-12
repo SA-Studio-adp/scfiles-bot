@@ -132,10 +132,15 @@ async def notify_confirm_cb(update, ctx: ContextTypes.DEFAULT_TYPE):
         pending["kind"], pending["item"], pending.get("poster_url"),
         category=pending["category"], title_override=pending.get("title"),
     )
-    if sent:
+    if sent > 0:
         await q.edit_message_text(f"✅ <b>Notification sent</b> to {bold(sent)} channel(s)/group(s).",
                                   parse_mode=ParseMode.HTML)
-    else:
+    elif sent == 0:
+        await q.edit_message_text(
+            "⚠️ <b>Channels are registered, but delivery failed for all of them.</b>\n"
+            "<i>Check the bot logs — usually a Telegram API rejection (bad HTML in "
+            "messages.py, or the notify bot isn't admin in that chat).</i>", parse_mode=ParseMode.HTML)
+    else:  # -1: NOTIFY_BOT_TOKEN unset, or no channels registered for this category
         await q.edit_message_text(
             "⚠️ <b>Nothing was sent.</b>\n"
             "<i>Check NOTIFY_BOT_TOKEN is set and channels are registered for this category "

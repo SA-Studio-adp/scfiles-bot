@@ -141,10 +141,15 @@ def _watch_button(kind: str, item: dict, title: str) -> dict:
     return {"inline_keyboard": [[{"text": f"{_WATCH_BUTTON_PREFIX}{title}", "url": watch_url(kind, item)}]]}
 
 def _footer() -> str:
+    """CHANNEL_HANDLE / REQUESTS_HANDLES / WEBSITE_LINK are admin-typed
+    constants in messages.py, not user data — but parse_mode=HTML still
+    means a literal '&' (e.g. "@a & @b") makes Telegram reject the ENTIRE
+    message with a 400 "can't parse entities" error. Escape them here so
+    editing those constants can never silently break every notification."""
     raw = _TEMPLATES.get("FOOTER", "")
     try:
-        return raw.format(channel_handle=_CHANNEL_HANDLE, requests_handles=_REQUESTS_HANDLES,
-                          website_link=_WEBSITE_LINK)
+        return raw.format(channel_handle=_esc(_CHANNEL_HANDLE), requests_handles=_esc(_REQUESTS_HANDLES),
+                          website_link=_esc(_WEBSITE_LINK))
     except Exception:
         logger.exception("FOOTER template format failed")
         return ""
@@ -207,15 +212,19 @@ async def _tg_call(session: aiohttp.ClientSession, method: str, payload: dict):
 
 async def notify_upload(kind: str, item: dict, poster_url: str = None, category: str = "hd",
                          title_override: str = None, session: aiohttp.ClientSession = None) -> int:
-    """Sends the notification and logs it. Returns the number of chats it
-    was sent to (0 if NOTIFY_BOT_TOKEN is unset or no channels match).
+    """Sends the notification and logs it. Returns:
+        >0  — sent to that many chats
+         0  — channels ARE registered for this category, but every send
+              failed (check logs — usually a Telegram API rejection, e.g.
+              bad HTML in messages.py, or the notify bot isn't admin there)
+        -1  — no channels are registered for this category at all
 
     ONE sendMessage per channel: if there's a poster, an invisible anchor
     tag embeds it as the message's link-preview image (see _embed_image_html
     docstring above) so it renders like an attached photo without a
     separate sendPhoto call — title/details/button all stay in one message."""
     if not NOTIFY_BOT_TOKEN:
-        return 0
+        return -1
     channels  = await load_channels()
     cats      = _categories_for_selection(category)
     chat_ids  = set()
@@ -223,7 +232,7 @@ async def notify_upload(kind: str, item: dict, poster_url: str = None, category:
         chat_ids.update(channels.get(cat, {}).keys())
     if not chat_ids:
         logger.info("No channels configured for category(ies) %s — skipping notify", cats)
-        return 0
+        return -1
 
     template_key, ctx = build_context(kind, item, title_override)
     raw = _TEMPLATES.get(template_key, "")

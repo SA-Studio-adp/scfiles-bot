@@ -365,6 +365,7 @@ async def main():
         if NOTIFY_BOT_TOKEN:
             try:
                 notify_app = build_notify_app(NOTIFY_BOT_TOKEN)
+                notify_app.add_error_handler(error_handler)  # was missing — failures were silent
                 await notify_app.initialize()
                 await notify_app.start()
                 await register_notify_commands(notify_app)
