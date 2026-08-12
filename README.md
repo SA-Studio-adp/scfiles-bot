@@ -8,9 +8,26 @@ loudly and stays contained instead of dragging down the whole process.
 
 ```bash
 pip install -r requirements.txt
-cp .env.example .env      # fill in TELEGRAM_TOKEN and BACKEND_URL at minimum
+cp .env.example .env      # fill in TELEGRAM_TOKEN, BACKEND_URL, MONGODB_URI at minimum
 python run.py
 ```
+
+## Storage: MongoDB, not local files
+
+Every piece of the bot's own state — admins, the backup target, registered
+notify channels, and upload history — lives in MongoDB now (`db.py`),
+**not** local `.json` files. There's nothing to set up beyond pointing
+`MONGODB_URI` at a database (a free MongoDB Atlas cluster works fine) —
+collections are created automatically on first write. If `MONGODB_URI` is
+missing or unreachable, the bot fails to start with a clear log message
+rather than silently breaking the first time someone runs `/addadmin`.
+
+**The 2-day Telegram backup still works exactly as before** — `/backup`
+and the scheduled job still zip up `movies.json` / `series.json` /
+`collections.json` from your backend, and now also include `admins.json`,
+`channels.json`, and `uploads_log.json` pulled fresh from MongoDB, so the
+Telegram backup remains a complete, restorable snapshot even though
+nothing is kept on local disk.
 
 ## Layout
 
@@ -19,6 +36,7 @@ run.py                     ← start here (repo root)
 scfiles_bot/
 ├── main.py                ← builds the Application, registers every handler, runs it
 ├── config.py               ← env vars, logging, the shared `state` object
+├── db.py                    ← ALL MongoDB access (admins, backup target, channels, upload history)
 ├── utils.py                 ← esc/bold/code/italic HTML helpers
 ├── auth.py                   ← is_admin(), @admin_only, /addadmin /removeadmin /listadmins
 ├── api_client.py              ← aiohttp session, api_get/post/put/delete, 30s TTL cache

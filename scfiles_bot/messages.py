@@ -26,7 +26,7 @@ episode_line, event_label, movie_count) — don't escape them again here.
 #   movie      -> {WEBSITE_LINK}/movie?id=<slug>
 #   series     -> {WEBSITE_LINK}/series?id=<slug>
 #   collection -> {WEBSITE_LINK}/collections?id=<slug>
-WEBSITE_LINK = "https://scfiles.vercel.app"
+WEBSITE_LINK = "https://sc_files4"
 
 CHANNEL_HANDLE    = "@sc_files4"
 REQUESTS_HANDLES  = "@sc_requests & @streamcenter_bot"
@@ -62,9 +62,9 @@ TEMPLATES = {
 
     # Appended after every one of the templates above.
     "FOOTER": (
-        "\n\n<b>Join our Channel :- {channel_handle}\n"
+        "\n\nJoin our Channel :- {channel_handle}\n"
         "To Get Direct Files Use : {requests_handles}\n\n"
-        "For more visit :- {website_link}</b>"
+        "For more visit :- {website_link}"
     ),
 
     # ── notify-bot commands (sent by the SAME bot that posts uploads) ────

@@ -1,0 +1,3 @@
+-r requirements.txt
+mongomock-motor>=0.0.30
+pyflakes>=3.2

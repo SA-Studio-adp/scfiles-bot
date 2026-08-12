@@ -15,11 +15,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY run.py .
 COPY scfiles_bot ./scfiles_bot
 
-# Persisted config files (.backup_config.json, .admins_config.json,
-# .channels_config.json, bot.log) are written to /app at runtime.
-# Mount a volume here to keep them across container restarts:
-#   docker run -v scfiles_data:/app ...
-VOLUME ["/app"]
+# All persistent state (admins, backup target, notify channels, upload
+# history) now lives in MongoDB — see MONGODB_URI in .env. Nothing here
+# needs a volume mount anymore; bot.log is written locally but is not
+# critical to persist (also visible via `docker logs`).
 
 EXPOSE 8080
 

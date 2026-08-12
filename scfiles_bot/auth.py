@@ -7,8 +7,9 @@ from telegram.ext import ContextTypes, ConversationHandler
 from telegram.constants import ParseMode
 
 from config import state, logger
-from config import save_admin_list as _save_admin_list, _ENV_ADMIN_IDS
+from config import _ENV_ADMIN_IDS
 from utils import code
+import db
 
 # ── auth ──────────────────────────────────────────────────────────────────────
 def is_admin(uid: int) -> bool:
@@ -52,7 +53,7 @@ async def cmd_addadmin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"\u2139\ufe0f {code(new_id)} is already an admin.",
             parse_mode=ParseMode.HTML)
     state.ADMIN_IDS.append(new_id)
-    _save_admin_list()
+    await db.add_admin(new_id)
     logger.info("Admin added: %d by %d", new_id, update.effective_user.id)
     await update.message.reply_text(
         f"\u2705 <b>Admin added!</b>\n"
@@ -87,7 +88,7 @@ async def cmd_removeadmin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"\u2139\ufe0f {code(rem_id)} is not in the admin list.",
             parse_mode=ParseMode.HTML)
     state.ADMIN_IDS.remove(rem_id)
-    _save_admin_list()
+    await db.remove_admin(rem_id)
     logger.info("Admin removed: %d by %d", rem_id, caller)
     await update.message.reply_text(
         f"\u2705 <b>Admin removed!</b>\n"

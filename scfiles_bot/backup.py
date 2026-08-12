@@ -1,4 +1,8 @@
-"""backup.py — building the backup ZIP / sending backup docs to a chat."""
+"""backup.py — building the backup ZIP / sending backup docs to a chat.
+Movies/series/collections come from your existing backend (unchanged).
+admins/channels/upload-history now live in MongoDB (db.py) — included here
+too so a Telegram backup is still a full, restorable snapshot even though
+the bot itself no longer keeps any local .json state files."""
 import asyncio, io, json, zipfile
 from datetime import datetime
 
@@ -6,6 +10,7 @@ from telegram.constants import ParseMode
 
 from config import state, IST, logger, _ENV_ADMIN_IDS
 from api_client import api_get
+import db
 
 async def _payloads() -> dict:
     specs = [("/api/movies","movies.json"),("/api/series","series.json"),("/api/collections","collections.json")]
@@ -18,6 +23,15 @@ async def _payloads() -> dict:
     out["admins.json"] = json.dumps(
         {"admin_ids": state.ADMIN_IDS, "env_admin_ids": _ENV_ADMIN_IDS},
         indent=2, ensure_ascii=False
+    ).encode()
+    # Registered notify channels + upload history — these now live ONLY in
+    # MongoDB, so bundling them here is what makes the Telegram backup a
+    # complete, restorable snapshot (not just the movie/series/collection data).
+    out["channels.json"] = json.dumps(
+        await db.get_channels(), indent=2, ensure_ascii=False
+    ).encode()
+    out["uploads_log.json"] = json.dumps(
+        await db.get_recent_uploads(db.UPLOADS_LOG_MAX), indent=2, ensure_ascii=False
     ).encode()
     return out
 

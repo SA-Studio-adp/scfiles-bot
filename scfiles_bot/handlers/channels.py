@@ -106,7 +106,7 @@ async def channel_category_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     _, cat, chat_id = q.data.split("_", 2)
     pending = ctx.user_data.pop("pending_channel", {})
     title = pending.get("title") or (q.message.chat.title if q.message and q.message.chat else "")
-    notify.add_channel(cat, chat_id, title or "")
+    await notify.add_channel(cat, chat_id, title or "")
     await q.edit_message_text(
         f"✅ <b>Registered!</b>\n🆔 {code(chat_id)}\n"
         f"📂 Category: <b>{notify.CATEGORY_LABEL[cat]}</b>\n\n"
@@ -123,7 +123,7 @@ async def cmd_removechannel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "Usage: <code>/removechannel &lt;predvd|hd|all&gt; &lt;chat_id&gt;</code>",
             parse_mode=ParseMode.HTML)
     cat, chat_id = args[0].lower(), args[1].strip()
-    _, removed = notify.remove_channel(cat, chat_id)
+    removed = await notify.remove_channel(cat, chat_id)
     if removed:
         await update.message.reply_text(
             f"✅ Removed {code(chat_id)} from <b>{notify.CATEGORY_LABEL[cat]}</b>.", parse_mode=ParseMode.HTML)
@@ -134,7 +134,7 @@ async def cmd_removechannel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_listchannels(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return await update.message.reply_text("⛔ <b>Access denied.</b>", parse_mode=ParseMode.HTML)
-    channels = notify.list_channels()
+    channels = await notify.list_channels()
     if not channels:
         return await update.message.reply_text(
             "📭 No channels registered yet.\n<i>Use /addchannel, or just forward a message "

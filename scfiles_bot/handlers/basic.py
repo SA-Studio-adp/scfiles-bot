@@ -13,8 +13,8 @@ from auth import is_admin
 from utils import esc, bold, code, italic
 from api_client import sess, api_get, fetch_all
 from backup import do_backup, make_zip
-from config import save_backup_target as _save_backup_target
 from keyboards import main_kb, back_kb
+import db
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -157,5 +157,5 @@ async def cmd_setbackup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"📦 <b>Backup channel:</b> {code(state.BACKUP_TARGET or 'Not set')}\n\n"
             f"Usage: <code>/setbackup &lt;chat_id&gt;</code>", parse_mode=ParseMode.HTML)
     state.BACKUP_TARGET = args[0].strip()
-    _save_backup_target(state.BACKUP_TARGET)
+    await db.set_backup_target(state.BACKUP_TARGET)
     await update.message.reply_text(f"✅ Backup chat → {code(state.BACKUP_TARGET)}", parse_mode=ParseMode.HTML)

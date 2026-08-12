@@ -3,8 +3,13 @@ config.py — environment configuration, logging, and shared mutable runtime
 state for the SCFiles bot. Every other module imports from here instead of
 holding its own copy of admin IDs / backup target / etc, so a change made
 in one handler is visible everywhere immediately.
+
+Persistence (admins, backup target, notify channels, upload history) lives
+entirely in MongoDB now — see db.py. This module only holds the in-memory
+`state` that gets seeded from Mongo at startup (main.py) and kept in sync
+by whichever handler changes it.
 """
-import json, logging, os
+import logging, os
 from datetime import datetime
 
 try:
@@ -28,13 +33,11 @@ BOT_TOKEN      = os.environ["TELEGRAM_TOKEN"]
 BACKEND_URL    = os.environ["BACKEND_URL"].rstrip("/")
 TMDB_API_KEY   = os.environ.get("TMDB_API_KEY", "").strip()
 _ENV_ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS","").split(",") if x.strip()]
-BACKUP_CHAT_ID = os.environ.get("BACKUP_CHAT_ID","").strip()
+BACKUP_CHAT_ID = os.environ.get("BACKUP_CHAT_ID","").strip()   # only used if Mongo has none set yet
 WEB_HOST       = os.environ.get("WEB_HOST","0.0.0.0")
 WEB_PORT       = int(os.environ.get("WEB_PORT","8080"))
 BOT_WEB_URL    = os.environ.get("BOT_WEB_URL","").rstrip("/")
 AUTO_PING_MIN  = int(os.environ.get("AUTO_PING_INTERVAL_MIN","4"))
-BACKUP_CFG     = os.environ.get("BACKUP_CONFIG_FILE",".backup_config.json")
-ADMINS_CFG     = os.environ.get("ADMINS_CONFIG_FILE",".admins_config.json")
 ADMIN_TOKEN    = os.environ.get("ADMIN_TOKEN","changeme")   # protects /admin
 
 TMDB_BASE = "https://api.themoviedb.org/3"
@@ -51,37 +54,9 @@ class _State:
         self.BOT_STARTED_AT = datetime.now(IST)
         self.LAST_BACKUP_AT = None
         self.LAST_PING_AT   = None
-        self.BACKUP_TARGET  = BACKUP_CHAT_ID
+        self.BACKUP_TARGET  = BACKUP_CHAT_ID   # overwritten from Mongo at startup if set there
         # seeded from ADMIN_IDS env var, extended at runtime by /addadmin
+        # (and by whatever's already in Mongo — see main.py startup)
         self.ADMIN_IDS: list[int] = list(_ENV_ADMIN_IDS)
 
 state = _State()
-
-# ── backup-target persistence ────────────────────────────────────────────
-def load_backup_target() -> str:
-    if os.path.exists(BACKUP_CFG):
-        try:
-            with open(BACKUP_CFG) as f:
-                v = json.load(f).get("backup_chat_id", "")
-                if v: return str(v)
-        except Exception: pass
-    return BACKUP_CHAT_ID
-
-def save_backup_target(cid: str):
-    with open(BACKUP_CFG, "w") as f:
-        json.dump({"backup_chat_id": str(cid)}, f)
-
-# ── admin-list persistence ───────────────────────────────────────────────
-def load_extra_admins() -> list:
-    """Load any admins added at runtime beyond those in the ADMIN_IDS env var."""
-    if os.path.exists(ADMINS_CFG):
-        try:
-            with open(ADMINS_CFG) as f:
-                return [int(x) for x in json.load(f).get("admin_ids", [])]
-        except Exception: pass
-    return []
-
-def save_admin_list():
-    """Persist the current in-memory admin list to disk."""
-    with open(ADMINS_CFG, "w") as f:
-        json.dump({"admin_ids": state.ADMIN_IDS}, f)

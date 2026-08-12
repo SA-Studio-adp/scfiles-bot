@@ -15,8 +15,8 @@ from telegram.ext import (Application, CommandHandler, CallbackQueryHandler,
                            MessageHandler, ConversationHandler, filters)
 
 from config import (state, logger, IST, BOT_TOKEN, BACKEND_URL, WEB_HOST, WEB_PORT,
-                     AUTO_PING_MIN, ADMIN_TOKEN,
-                     load_backup_target, load_extra_admins)
+                     AUTO_PING_MIN, ADMIN_TOKEN)
+import db
 from errors import error_handler
 from scheduler import job_backup, job_ping
 
@@ -42,9 +42,20 @@ from notify_bot import build_notify_app, register_commands as register_notify_co
 
 
 async def main():
-    state.BACKUP_TARGET = load_backup_target()
+    # MongoDB is now required infrastructure (replaces the old local .json
+    # state files) — fail fast and loudly if it's unreachable, rather than
+    # letting the first /addadmin or /setbackup silently break later.
+    try:
+        await db.ping()
+        logger.info("MongoDB connection OK (db=%s)", db.MONGODB_DB)
+    except Exception as e:
+        logger.error("MongoDB connection FAILED: %s", e)
+        logger.error("Set MONGODB_URI (and optionally MONGODB_DB) and try again.")
+        raise
+
+    state.BACKUP_TARGET = await db.get_backup_target()
     # Load any admins that were added at runtime in a previous session
-    for uid in load_extra_admins():
+    for uid in await db.get_admin_ids():
         if uid not in state.ADMIN_IDS:
             state.ADMIN_IDS.append(uid)
     logger.info("=" * 56)
@@ -399,6 +410,7 @@ async def main():
         await runner.cleanup(); scheduler.shutdown(wait=False)
         from api_client import close_session
         await close_session()
+        await db.close()
 
 
 if __name__ == "__main__":

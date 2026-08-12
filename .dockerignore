@@ -1,11 +1,9 @@
 .env
 *.log
-.backup_config.json
-.admins_config.json
-.channels_config.json
 __pycache__/
 *.pyc
 .git
 .gitignore
 README.md
 .env.example
+tests/

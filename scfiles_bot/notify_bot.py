@@ -51,7 +51,7 @@ def _relative_time(iso_ts: str) -> str:
 
 
 async def cmd_uploads(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    entries = notify.load_recent_uploads(10)
+    entries = await notify.load_recent_uploads(10)
     if not entries:
         await update.message.reply_text(_fmt("BOT_UPLOADS_EMPTY"), parse_mode=ParseMode.HTML)
         return

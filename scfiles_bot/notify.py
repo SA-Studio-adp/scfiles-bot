@@ -26,22 +26,21 @@ Flow (see handlers/notify_flow.py for the conversation states)
     → confirmation summary → [✅ Confirm] [❌ Cancel]
     → sent to every channel registered under that category (+ "all")
 
-Registering a channel (/addchannel, in handlers/channels.py) verifies the
-target is actually a channel/group — not a person's private chat — before
-letting an admin register it.
+Persistence for registered channels and the upload-history log now lives
+entirely in MongoDB — see db.py. This module just calls those functions.
 
 Public API
 ──────────
   await notify_upload(kind, item, poster_url, category, title, session=None)
   await verify_notify_bot_in_chat(chat_id)
-  log_upload(...) / load_recent_uploads(n)
+  await log_upload(...) / await load_recent_uploads(n)
 """
-import json, logging, os
-from datetime import datetime
+import logging, os
 
 import aiohttp
 
 from utils import esc as _esc
+import db
 
 try:
     from messages import (TEMPLATES as _TEMPLATES, WEBSITE_LINK as _WEBSITE_LINK,
@@ -54,56 +53,31 @@ except ImportError:
 logger = logging.getLogger("scfiles-bot.notify")
 
 NOTIFY_BOT_TOKEN = os.environ.get("NOTIFY_BOT_TOKEN", "").strip()
-CHANNELS_CFG      = os.environ.get("CHANNELS_CONFIG_FILE", ".channels_config.json")
-UPLOADS_LOG_FILE  = os.environ.get("UPLOADS_LOG_FILE", ".uploads_log.json")
-UPLOADS_LOG_MAX   = 50   # keep this many, /uploads shows the most recent 10
 TG_API            = "https://api.telegram.org/bot{token}/{method}"
 
 CATEGORIES = ("predvd", "hd", "all")
 CATEGORY_LABEL = {"predvd": "📀 PreDVD", "hd": "🎬 HD", "all": "🌐 All"}
 KIND_ICON = {"movie": "🎬", "series": "📺", "collection": "🗂", "episode": "📺"}
 
-# ── channel config: {category: {chat_id: title}} ─────────────────────────
-def load_channels() -> dict:
-    if os.path.exists(CHANNELS_CFG):
-        try:
-            with open(CHANNELS_CFG) as f:
-                data = json.load(f)
-                for k, v in list(data.items()):
-                    if isinstance(v, list):
-                        data[k] = {str(x): "" for x in v}
-                return data
-        except Exception:
-            logger.exception("Failed to load %s", CHANNELS_CFG)
-    return {}
+# ── channel config: {category: {chat_id: title}} — all delegate to db.py ──
+async def load_channels() -> dict:
+    return await db.get_channels()
 
-def save_channels(channels: dict):
-    with open(CHANNELS_CFG, "w") as f:
-        json.dump(channels, f, indent=2, ensure_ascii=False)
+async def add_channel(category: str, chat_id, title: str = ""):
+    await db.add_channel(category, chat_id, title)
 
-def add_channel(category: str, chat_id, title: str = "") -> dict:
-    category = category.strip().lower()
-    channels = load_channels()
-    bucket = channels.setdefault(category, {})
-    bucket[str(chat_id)] = title or bucket.get(str(chat_id), "")
-    save_channels(channels)
-    return channels
+async def remove_channel(category: str, chat_id) -> bool:
+    return await db.remove_channel(category, chat_id)
 
-def remove_channel(category: str, chat_id) -> tuple[dict, bool]:
-    category = category.strip().lower()
-    channels = load_channels()
-    bucket = channels.get(category, {})
-    removed = str(chat_id) in bucket
-    bucket.pop(str(chat_id), None)
-    if bucket:
-        channels[category] = bucket
-    else:
-        channels.pop(category, None)
-    save_channels(channels)
-    return channels, removed
+async def list_channels() -> dict:
+    return await db.get_channels()
 
-def list_channels() -> dict:
-    return load_channels()
+# ── upload history — delegate to db.py ────────────────────────────────────
+async def log_upload(kind: str, title: str, category: str):
+    await db.log_upload(kind, title, category)
+
+async def load_recent_uploads(n: int = 10) -> list:
+    return await db.get_recent_uploads(n)
 
 # ── chat-type verification (used by /addchannel) ──────────────────────────
 async def verify_notify_bot_in_chat(chat_id):
@@ -117,30 +91,6 @@ async def verify_notify_bot_in_chat(chat_id):
     if data and data.get("ok"):
         return data.get("result")
     return None
-
-# ── upload history (for the notify-bot's /uploads command) ───────────────
-def log_upload(kind: str, title: str, category: str):
-    entries = load_recent_uploads(UPLOADS_LOG_MAX)
-    entries.insert(0, {
-        "kind": kind, "title": title, "category": category,
-        "ts": datetime.utcnow().isoformat(),
-    })
-    entries = entries[:UPLOADS_LOG_MAX]
-    try:
-        with open(UPLOADS_LOG_FILE, "w") as f:
-            json.dump(entries, f, indent=2, ensure_ascii=False)
-    except Exception:
-        logger.exception("Failed to write %s", UPLOADS_LOG_FILE)
-
-def load_recent_uploads(n: int = 10) -> list:
-    if not os.path.exists(UPLOADS_LOG_FILE):
-        return []
-    try:
-        with open(UPLOADS_LOG_FILE) as f:
-            return json.load(f)[:n]
-    except Exception:
-        logger.exception("Failed to read %s", UPLOADS_LOG_FILE)
-        return []
 
 # ── HTML escaping (parse_mode=HTML everywhere in this module) ────────────
 def md_escape(v) -> str:
@@ -266,7 +216,7 @@ async def notify_upload(kind: str, item: dict, poster_url: str = None, category:
     separate sendPhoto call — title/details/button all stay in one message."""
     if not NOTIFY_BOT_TOKEN:
         return 0
-    channels  = load_channels()
+    channels  = await load_channels()
     cats      = _categories_for_selection(category)
     chat_ids  = set()
     for cat in cats:
@@ -313,6 +263,6 @@ async def notify_upload(kind: str, item: dict, poster_url: str = None, category:
         if close_session:
             await session.close()
 
-    log_upload(kind, display_title, category)
+    await log_upload(kind, display_title, category)
     return sent
 
