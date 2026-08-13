@@ -8,7 +8,7 @@ from telegram.constants import ParseMode
 from auth import admin_only
 from utils import esc, bold, code, italic
 from api_client import api_get, api_post, api_err
-from tmdb import tmdb_tv, poster
+from tmdb import tmdb_tv, backdrop
 from keyboards import yes_no_kb, back_kb, ep_more_kb
 from handlers.states import (ESS_ID, ESS_ACTION, ESS_SN, ESS_EP, ESS_EP360, ESS_EP720,
                               ESS_EP1080, ESS_EP_SUB, ESS_EP_MORE, ESS_DEL_EP,
@@ -283,7 +283,7 @@ async def ess_ep_more_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         item["year"]     = (info.get("first_air_date") or "")[:4]
         item["genres"]   = info.get("genres", [])
         item["overview"] = info.get("overview", "")
-        poster_url = poster(info)
+        poster_url = backdrop(info)   # landscape for series/episode notifications
     episode_line, is_new_season = _session_upload_summary(session_episodes, orig_season_numbers)
     item["episode_line"] = episode_line or summary.strip().replace("\n", " · ")
     item["event_label"]  = "New Season Added" if is_new_season else "New Episode(s) Added"

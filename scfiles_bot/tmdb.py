@@ -5,7 +5,7 @@ import urllib.parse
 
 import aiohttp
 
-from config import BACKEND_URL, TMDB_BASE, TMDB_IMG, TMDB_API_KEY, logger
+from config import BACKEND_URL, TMDB_BASE, TMDB_IMG, TMDB_BACKDROP_IMG, TMDB_API_KEY, logger
 from api_client import sess
 from utils import esc
 
@@ -43,6 +43,8 @@ def fmt_tv(t: dict) -> str:
             f"📝 <i>{esc((t.get('overview') or 'No overview.')[:300])}</i>")
 
 def poster(info: dict):
+    """Portrait poster (poster_path) — used for movies, and for the
+    admin-facing TMDB preview shown while adding/searching anything."""
     p = info.get("poster_path")
     if not p:
         return None
@@ -51,3 +53,15 @@ def poster(info: dict):
     if str(p).startswith("http"):
         return p
     return f"{TMDB_IMG}{p}"
+
+def backdrop(info: dict):
+    """Landscape image (backdrop_path) — used for series/episode-update
+    notifications. Falls back to the portrait poster if TMDB has no
+    backdrop for this title, so a notification still gets SOME image
+    rather than none."""
+    p = info.get("backdrop_path")
+    if not p:
+        return poster(info)
+    if str(p).startswith("http"):
+        return p
+    return f"{TMDB_BACKDROP_IMG}{p}"

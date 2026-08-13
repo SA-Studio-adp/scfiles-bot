@@ -30,7 +30,7 @@ WEBSITE_LINK = "https://scfiles.vercel.app"
 
 CHANNEL_HANDLE    = "@sc_files4"
 REQUESTS_HANDLES  = "@sc_requests & @streamcenter_bot"
-WATCH_BUTTON_PREFIX = "Watch . "   # button label = this + the movie/series/collection name
+WATCH_BUTTON_PREFIX = "Watch  •  "   # button label = this + the movie/series/collection name
 
 TEMPLATES = {
 
@@ -49,15 +49,15 @@ TEMPLATES = {
     # new episode(s) added to an existing series — {event_label} is filled
     # in automatically as "New Season Added" or "New Episode(s) Added"
     "EPISODE_UPDATE": (
-        '📺 <b>"{title}"</b> — {event_label}!\n\n'
-        "🆕 {episode_line}\n"
-        "📅 {year}  •  🎭 {genre}\n\n"
-        '"{overview}"'
+        '<blockquote>📺 <b>{title}</b> — {event_label}!</blockquote>\n\n'
+        "<blockquote>🆕 {episode_line}</blockquote>\n"
+        "<blockquote>📅 {year}  •  🎭 {genre}</blockquote>\n\n\n"
+        '<blockquote><i>{overview}</i></blockquote>'
     ),
 
     "COLLECTION": (
-        '🗂 <b>"{title}" Collection</b>\n\n'
-        "🎬 {movie_count} movies inside"
+        '<blockquote>🗂 <b>{title} Collection</b></blockquote>\n\n'
+        "<blockquote>🎬 {movie_count} movies inside <b>{title} Collection</b></blockquote>"
     ),
 
     # Appended after every one of the templates above.
@@ -70,12 +70,14 @@ TEMPLATES = {
     # ── notify-bot commands (sent by the SAME bot that posts uploads) ────
     "BOT_START": (
         "👋 <b>Welcome!</b>\n\n"
-        "This channel is fed automatically — new <b>movies</b>, <b>series</b>, "
-        "and <b>collections</b> get posted here the moment they're uploaded.\n\n"
-        "Use /uploads to see the last 10 uploads."
+        "This bot is fed automatically — new <b>movies</b>, <b>series</b>, "
+        "and <b>collections</b> get posted the moment they're uploaded.\n\n"
+        "Use /uploads to see the last 10 uploads.\n\n"
+        "<blockquote><b>\n\nJoin our Channel :- {channel_handle}</blockquote>\n\n"
+        "<blockquote>For more visit :- {website_link}</b></blockquote>"
     ),
 
-    "BOT_UPLOADS_HEADER": "📋 <b>Last {count} uploads</b>\n",
+    "BOT_UPLOADS_HEADER": "<blockquote>📋 <b>Last {count} uploads</b></blockquote>\n",
 
     "BOT_UPLOADS_ITEM": "{icon} <b>{title}</b>  ·  {category_label}  ·  <i>{when}</i>",
 

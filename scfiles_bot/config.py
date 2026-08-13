@@ -42,6 +42,7 @@ ADMIN_TOKEN    = os.environ.get("ADMIN_TOKEN","changeme")   # protects /admin
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 TMDB_IMG  = "https://image.tmdb.org/t/p/w500"
+TMDB_BACKDROP_IMG = "https://image.tmdb.org/t/p/w780"   # wider size — landscape backdrops
 IST       = pytz.timezone("Asia/Kolkata")
 
 # ── shared mutable runtime state ─────────────────────────────────────────

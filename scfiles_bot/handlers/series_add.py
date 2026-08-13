@@ -7,7 +7,7 @@ from telegram.constants import ParseMode
 from auth import admin_only
 from utils import esc, bold, code, italic
 from api_client import api_post, api_err
-from tmdb import tmdb_tv, fmt_tv, poster
+from tmdb import tmdb_tv, fmt_tv, poster, backdrop
 from keyboards import yes_no_kb, back_kb, ep_more_kb
 from handlers.states import (AS_TMDB, AS_SN, AS_EP, AS_EP360, AS_EP720, AS_EP1080,
                               AS_EP_SUB, AS_EP_MORE)
@@ -153,5 +153,5 @@ async def as_confirm_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         item["year"]     = (info.get("first_air_date") or "")[:4]
         item["genres"]   = info.get("genres", [])
         item["overview"] = info.get("overview", "")
-        poster_url = poster(info)
+        poster_url = backdrop(info)   # landscape for series notifications
     return await start_notify_flow(update, ctx, kind="series", item=item, poster_url=poster_url)
