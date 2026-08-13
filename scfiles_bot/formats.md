@@ -56,6 +56,19 @@ already escapes those values before inserting them, so typing a raw `&` or
 
 ## What you CANNOT do
 
+- **Close tags out of order.** `<blockquote>text<b>bold</blockquote></b>`
+  closes `blockquote` before `b` — that's "crossing" tags, and Telegram
+  rejects the whole message for it, the same 400 error as an unescaped
+  `&`. Always close the tag you opened *most recently* first:
+  `<blockquote>text<b>bold</b></blockquote>` ✅. `tests/test_html_safety.py`
+  checks every template for this before you deploy — run it after editing
+  messages.py.
+- If you reference a `{placeholder}` that the code sending that particular
+  message doesn't supply, it now renders as blank text instead of
+  crashing — but blank is still wrong. See "Where each template's
+  placeholders come from" below for what's actually available where, and
+  `test_html_safety.py`'s no-kwargs check for confirmation.
+
 - Put text *above* an image in the same message — that's why the poster
   is embedded as a link-preview (see notify.py's `_embed_image_html`)
   instead of a classic photo attachment; whatever you write in a template
@@ -73,8 +86,8 @@ already escapes those values before inserting them, so typing a raw `&` or
 | `SERIES` | `{title}` `{year}` `{genre}` `{overview}` |
 | `EPISODE_UPDATE` | `{title}` `{event_label}` `{episode_line}` `{year}` `{genre}` `{overview}` |
 | `COLLECTION` | `{title}` `{movie_count}` |
-| `FOOTER` (appended after every one above) | `{channel_handle}` `{requests_handles}` `{website_link}` |
-| `BOT_START` | none |
+| `FOOTER` (appended after every upload template above — NOT after BOT_START) | `{channel_handle}` `{requests_handles}` `{website_link}` |
+| `BOT_START` | `{channel_handle}` `{requests_handles}` `{website_link}` (optional — use them or not) |
 | `BOT_UPLOADS_HEADER` | `{count}` |
 | `BOT_UPLOADS_ITEM` | `{icon}` `{title}` `{category_label}` `{when}` |
 | `BOT_UPLOADS_EMPTY` | none |

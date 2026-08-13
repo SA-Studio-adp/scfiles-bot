@@ -47,7 +47,7 @@ try:
                           CHANNEL_HANDLE as _CHANNEL_HANDLE, REQUESTS_HANDLES as _REQUESTS_HANDLES,
                           WATCH_BUTTON_PREFIX as _WATCH_BUTTON_PREFIX)
 except ImportError:
-    _TEMPLATES, _WEBSITE_LINK = {}, "https://yourwebsite.com"
+    _TEMPLATES, _WEBSITE_LINK = {}, "https://scfiles.vercel.app"
     _CHANNEL_HANDLE, _REQUESTS_HANDLES, _WATCH_BUTTON_PREFIX = "", "", "Watch . "
 
 logger = logging.getLogger("scfiles-bot.notify")
@@ -97,6 +97,19 @@ def md_escape(v) -> str:
     """Kept as an alias (some deployments may still import this name) —
     now escapes for HTML, since that's the parse_mode this module uses."""
     return _esc(v)
+
+class _SafeDict(dict):
+    def __missing__(self, key):
+        return ""
+
+def safe_format(template: str, **kwargs) -> str:
+    """Formats a messages.py template, filling any placeholder that wasn't
+    supplied with an empty string instead of raising KeyError. Editing
+    messages.py and adding/removing a {placeholder} can then never
+    silently break the ENTIRE message (crash → nothing sent) — worst case
+    an unsupplied placeholder just renders blank, which is visible and
+    fixable rather than a total failure."""
+    return template.format_map(_SafeDict(kwargs))
 
 def _embed_image_html(url: str) -> str:
     """The invisible-anchor trick: an <a> tag around a zero-width-joiner
@@ -148,8 +161,8 @@ def _footer() -> str:
     editing those constants can never silently break every notification."""
     raw = _TEMPLATES.get("FOOTER", "")
     try:
-        return raw.format(channel_handle=_esc(_CHANNEL_HANDLE), requests_handles=_esc(_REQUESTS_HANDLES),
-                          website_link=_esc(_WEBSITE_LINK))
+        return safe_format(raw, channel_handle=_esc(_CHANNEL_HANDLE), requests_handles=_esc(_REQUESTS_HANDLES),
+                           website_link=_esc(_WEBSITE_LINK))
     except Exception:
         logger.exception("FOOTER template format failed")
         return ""
@@ -240,7 +253,7 @@ async def notify_upload(kind: str, item: dict, poster_url: str = None, category:
         logger.error("Missing template %s in messages.py", template_key)
         return 0
     try:
-        body = raw.format(**ctx)
+        body = safe_format(raw, **ctx)
     except Exception:
         logger.exception("Template format failed for %s", template_key)
         return 0

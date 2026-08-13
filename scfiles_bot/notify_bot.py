@@ -18,21 +18,32 @@ from utils import esc
 import notify
 
 try:
-    from messages import TEMPLATES as _TEMPLATES, WEBSITE_LINK as _WEBSITE_LINK
+    from messages import (TEMPLATES as _TEMPLATES, WEBSITE_LINK as _WEBSITE_LINK,
+                          CHANNEL_HANDLE as _CHANNEL_HANDLE, REQUESTS_HANDLES as _REQUESTS_HANDLES)
 except ImportError:
-    _TEMPLATES, _WEBSITE_LINK = {}, "https://yourwebsite.com"
+    _TEMPLATES, _WEBSITE_LINK = {}, "https://scfiles.vercel.app"
+    _CHANNEL_HANDLE, _REQUESTS_HANDLES = "", ""
 
 
 def _fmt(name: str, **kw) -> str:
-    return _TEMPLATES.get(name, "").format(**kw)
+    """Uses notify.safe_format so an unsupplied {placeholder} in a
+    hand-edited template renders blank instead of crashing the command
+    entirely (see notify.safe_format's docstring)."""
+    return notify.safe_format(_TEMPLATES.get(name, ""), **kw)
 
 def _website_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("🌐 Visit Website", url=_WEBSITE_LINK)]])
 
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    # channel_handle/requests_handles/website_link are supplied here so
+    # BOT_START can reference them directly if you've customised it to
+    # (as-is, the default BOT_START already does) — no separate footer is
+    # appended after BOT_START, since that would duplicate this info.
+    text = _fmt("BOT_START", channel_handle=esc(_CHANNEL_HANDLE),
+                requests_handles=esc(_REQUESTS_HANDLES), website_link=esc(_WEBSITE_LINK))
     await update.message.reply_text(
-        _fmt("BOT_START") + notify._footer(), parse_mode=ParseMode.HTML,
+        text, parse_mode=ParseMode.HTML,
         disable_web_page_preview=True, reply_markup=_website_kb())
 
 
