@@ -21,12 +21,17 @@ Env vars
 
 Collections used (created automatically on first write, no manual setup
 needed — just an empty/existing MongoDB database):
-  settings  — one document: {_id: "backup_target", chat_id: "..."}
-  admins    — one document per admin: {_id: <user_id int>}
-  channels  — one document per (category, chat_id) pair:
-              {_id: "<category>:<chat_id>", category, chat_id, title}
-  uploads   — one document per logged upload:
-              {kind, title, category, ts}, newest first
+  settings   — one document: {_id: "backup_target", chat_id: "..."}
+  admins     — one document per admin: {_id: <user_id int>}
+  channels   — one document per (category, chat_id) pair:
+               {_id: "<category>:<chat_id>", category, chat_id, title}
+  uploads    — one document per logged upload:
+               {kind, title, category, ts}, newest first
+  users      — one document per person who's DMed the notify bot:
+               {_id: <user_id int>, first_name} — /broadcast's recipient list
+  scheduled  — one document per scheduled notification:
+               {kind, item, poster_url, category, title, scheduled_at (UTC
+               ISO string), sent (bool), created_by}
 """
 import logging
 import os
@@ -135,4 +140,46 @@ async def log_upload(kind: str, title: str, category: str):
 
 async def get_recent_uploads(n: int = 10) -> list:
     cursor = _get_db().uploads.find({}, {"_id": 0}).sort("ts", -1).limit(n)
+    return [doc async for doc in cursor]
+
+
+# ── users (who's DMed the notify bot — /broadcast's recipient list) ──────
+async def add_user(user_id: int, first_name: str = ""):
+    await _get_db().users.update_one(
+        {"_id": int(user_id)}, {"$set": {"_id": int(user_id), "first_name": first_name}},
+        upsert=True)
+
+async def get_all_user_ids() -> list:
+    cursor = _get_db().users.find({}, {"_id": 1})
+    return [doc["_id"] async for doc in cursor]
+
+async def get_all_channel_ids() -> list:
+    """Every distinct registered channel/group chat_id, across all
+    categories, deduplicated — used by /broadcast."""
+    ids = set()
+    cursor = _get_db().channels.find({}, {"chat_id": 1})
+    async for doc in cursor:
+        ids.add(str(doc["chat_id"]))
+    return list(ids)
+
+
+# ── scheduled notifications ───────────────────────────────────────────────
+async def add_scheduled_notification(doc: dict) -> str:
+    doc = dict(doc)
+    doc["sent"] = False
+    result = await _get_db().scheduled.insert_one(doc)
+    return str(result.inserted_id)
+
+async def get_due_scheduled_notifications(now_iso: str) -> list:
+    """Unsent notifications whose scheduled_at has already passed."""
+    cursor = _get_db().scheduled.find({"sent": False, "scheduled_at": {"$lte": now_iso}})
+    return [doc async for doc in cursor]
+
+async def mark_scheduled_notification_sent(_id):
+    await _get_db().scheduled.update_one({"_id": _id}, {"$set": {"sent": True}})
+
+async def get_pending_scheduled_notifications() -> list:
+    """All not-yet-sent scheduled notifications (any time), newest first —
+    used for an admin-facing /listscheduled-type view if needed later."""
+    cursor = _get_db().scheduled.find({"sent": False}).sort("scheduled_at", 1)
     return [doc async for doc in cursor]

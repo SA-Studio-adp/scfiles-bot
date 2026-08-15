@@ -46,7 +46,8 @@ scfiles_bot/
 ├── errors.py                      ← global PTB error handler
 ├── scheduler.py                    ← periodic backup + self-ping jobs
 ├── notify.py                        ← channel-notification engine (routing, sending, upload history)
-├── notify_bot.py                     ← second Application (NOTIFY_BOT_TOKEN): /start, /uploads
+├── notify_bot.py                     ← second Application (NOTIFY_BOT_TOKEN): /start, /uploads, /broadcast
+├── broadcast.py                       ← /broadcast conversation (notify bot, admin-only)
 ├── messages.py                        ← EDIT THIS to restyle every notification/command message
 ├── formats.md                          ← HTML formatting reference for messages.py (bold, italic, etc)
 │
@@ -69,7 +70,8 @@ scfiles_bot/
 │
 └── web/
     ├── dashboard.py           ← "/" status page, /health, /backup/all, /logs
-    └── admin_panel.py          ← token-protected /admin single-page app
+    ├── admin_panel.py          ← token-protected /admin single-page app
+    └── schedule_picker.py       ← "/schedule" Web App date/time picker page
 ```
 
 ## Adding a new command
@@ -124,7 +126,7 @@ handles, website link — edit in `messages.py`'s `FOOTER` template) is
 appended, and a **"Watch · &lt;name&gt;" button** linking to your website
 is attached below, built from the item's slug ID:
 - movie → `WEBSITE_LINK/movie?id=<slug>`
-- series/episode update → `WEBSITE_LINK/series?id=<slug>`
+- series/episode update → `WEBSITE_LINK/pages/series?id=<slug>`
 - collection → `WEBSITE_LINK/collections?id=<slug>`
 
 **New season / new episode wording:** when `/editseries` saves, the bot
@@ -142,3 +144,45 @@ reference (bold, italic, underline, quote blocks, spoilers, etc) is in
 
 `/removechannel <predvd|hd|all> <chat_id>` and `/listchannels` manage the
 registered list.
+
+## Schedule Notification
+
+Between "Yes, notify" and "No, skip" in the notify prompt is a
+**"🗓 Schedule Notification"** button. It only appears when `BOT_WEB_URL`
+is set to a real public **HTTPS** URL — Telegram Web App buttons flatly
+refuse to open on `http://` or `localhost`, so without one configured the
+button is simply omitted rather than shown broken.
+
+Tapping it opens `BOT_WEB_URL/schedule` — a small page
+(`web/schedule_picker.py`) with a date/time picker (labelled IST, matching
+the rest of the bot) and quick +1h/+3h/+1 day/+1 week buttons. Picking a
+time uses Telegram's own `Telegram.WebApp.sendData()` bridge to hand the
+value back to the bot and close itself — no server-side session, no
+backend calls from the page at all. The bot then continues into the
+normal category → title → confirm flow; on confirm, the notification is
+stored in MongoDB (the `scheduled` collection) instead of sending
+immediately.
+
+A background job (`scheduler.job_send_scheduled_notifications`, every
+1 minute) sends anything whose time has arrived and marks it sent — so a
+missed minute or two of bot downtime just means a slightly late send, not
+a lost notification, since it's picked up on the next check after restart.
+
+## /broadcast
+
+Run on the **notify bot** (not the admin bot), admin-only. Sends a
+text-or-photo message to **every** registered channel/group (any
+category, deduplicated) **and every user** who has ever DMed the notify
+bot (tracked automatically on `/start` and `/uploads`).
+
+```
+/broadcast
+→ "Send me the message — text, or a photo with a caption"
+→ shows a preview + recipient count
+→ [✅ Send] [❌ Cancel]
+```
+
+Sends are HTML-formatted, one at a time with a small delay to stay under
+Telegram's rate limits, and a failure on one recipient (blocked bot,
+kicked from a group, etc) never stops the rest — the final summary reports
+sent vs failed counts.

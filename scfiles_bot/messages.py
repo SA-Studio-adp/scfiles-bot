@@ -20,7 +20,7 @@ episode_line, event_label, movie_count) — don't escape them again here.
 # Used to build every "Watch · <name>" button below, AND mentioned in the
 # footer's "For more visit" line:
 #   movie      -> {WEBSITE_LINK}/movie?id=<slug>
-#   series     -> {WEBSITE_LINK}/series?id=<slug>
+#   series     -> {WEBSITE_LINK}/pages/series?id=<slug>
 #   collection -> {WEBSITE_LINK}/collections?id=<slug>
 WEBSITE_LINK = "https://scfiles.vercel.app"
 CHANNEL_HANDLE    = "@sc_files4"
@@ -66,5 +66,5 @@ TEMPLATES = {
     ),
     "BOT_UPLOADS_HEADER": "<blockquote>📋 <b>Last {count} uploads</b></blockquote>\n",
     "BOT_UPLOADS_ITEM": "{icon} <b>{title}</b>  ·  {category_label}  ·  <i>{when}</i>",
-    "BOT_UPLOADS_EMPTY": "<b>📭 No uploads logged yet.</b>",
+    "BOT_UPLOADS_EMPTY": "📭 No uploads logged yet.",
 }

@@ -19,25 +19,51 @@ Usage from a calling handler, right after a successful save:
 Register these four states (imported from handlers.states) in the calling
 ConversationHandler, pointing at the handlers in THIS module:
 
-    NOTIFY_ASK:     [CallbackQueryHandler(notify_ask_cb,     pattern="^ntf_")]
+    NOTIFY_ASK:     [CallbackQueryHandler(notify_ask_cb,     pattern="^ntf_"),
+                      MessageHandler(filters.StatusUpdate.WEB_APP_DATA, notify_schedule_webapp_data)]
     NOTIFY_CAT:     [CallbackQueryHandler(notify_cat_cb,     pattern="^ntf_")]
     NOTIFY_TITLE:   [MessageHandler(filters.TEXT & ~filters.COMMAND, notify_title_msg)]
     NOTIFY_CONFIRM: [CallbackQueryHandler(notify_confirm_cb, pattern="^ntf_")]
+
+The middle button in the initial Yes/No prompt ("🗓 Schedule Notification")
+opens BOT_WEB_URL/schedule as a Telegram Web App — a date/time picker (IST)
+that sends its pick back as a web_app_data message and closes itself. That
+message is caught by notify_schedule_webapp_data (registered in the SAME
+NOTIFY_ASK state, since a Web App button doesn't produce a callback_data
+event on click — only once the picker sends data back does the bot hear
+anything), which stores pending["scheduled_at"] and continues into the
+normal category/title/confirm flow. At NOTIFY_CONFIRM, a pending
+scheduled_at means the notification is stored in MongoDB instead of sent
+immediately — see scheduler.py's job_send_scheduled_notifications.
 """
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from datetime import datetime
+import json
+
+import pytz
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.ext import ContextTypes, ConversationHandler
 from telegram.constants import ParseMode
 
 import notify
+import db
+from config import BOT_WEB_URL, IST
 from utils import esc, bold, code, italic
 from handlers.states import NOTIFY_ASK, NOTIFY_CAT, NOTIFY_TITLE, NOTIFY_CONFIRM
 
 
 def _ask_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[
+    rows = [[
         InlineKeyboardButton("🔔 Yes, notify",  callback_data="ntf_ask_yes"),
         InlineKeyboardButton("🔕 No, skip",     callback_data="ntf_ask_no"),
-    ]])
+    ]]
+    if BOT_WEB_URL and BOT_WEB_URL.startswith("https://"):
+        # Web App buttons require a real public HTTPS URL — Telegram
+        # rejects the button outright otherwise, so only show it when one
+        # is actually configured.
+        rows.insert(1, [InlineKeyboardButton(
+            "🗓 Schedule Notification",
+            web_app=WebAppInfo(url=f"{BOT_WEB_URL}/schedule"))])
+    return InlineKeyboardMarkup(rows)
 
 def _cat_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[
@@ -80,6 +106,36 @@ async def notify_ask_cb(update, ctx: ContextTypes.DEFAULT_TYPE):
     return NOTIFY_CAT
 
 
+async def notify_schedule_webapp_data(update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Fired when the schedule-picker Web App (web/schedule_picker.py)
+    calls Telegram.WebApp.sendData() and closes itself — arrives as a
+    normal message with a web_app_data payload, NOT a callback query."""
+    pending = ctx.user_data.get("pending_notify")
+    if not pending:
+        await update.message.reply_text("❌ <b>Session expired.</b>", parse_mode=ParseMode.HTML)
+        return ConversationHandler.END
+    try:
+        data = json.loads(update.message.web_app_data.data)
+        picked = data["scheduled_at_ist"]              # "YYYY-MM-DDTHH:MM", IST wall-clock
+        naive_ist = datetime.strptime(picked, "%Y-%m-%dT%H:%M")
+        scheduled_ist = IST.localize(naive_ist)
+    except Exception:
+        await update.message.reply_text(
+            "❌ <b>Couldn't read the picked time.</b> Try again.", parse_mode=ParseMode.HTML)
+        return NOTIFY_ASK
+    # Store as naive UTC ISO (no offset suffix) — same convention db.py
+    # already uses for uploads' `ts`, so plain string comparison in
+    # MongoDB ($lte) sorts correctly without any offset-mismatch risk.
+    scheduled_utc = scheduled_ist.astimezone(pytz.utc).replace(tzinfo=None)
+    pending["scheduled_at"] = scheduled_utc.isoformat()
+    pending["scheduled_at_display"] = scheduled_ist.strftime("%d %b %Y, %H:%M IST")
+    await update.message.reply_text(
+        f"🗓 Scheduled for {bold(pending['scheduled_at_display'])}\n\n"
+        f"📂 <b>Which category should this go to?</b>",
+        reply_markup=_cat_kb(), parse_mode=ParseMode.HTML)
+    return NOTIFY_CAT
+
+
 async def notify_cat_cb(update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     cat = q.data.split("_", 2)[2]
@@ -108,11 +164,14 @@ async def notify_title_msg(update, ctx: ContextTypes.DEFAULT_TYPE):
 
     cat = pending["category"]
     kind = pending["kind"]
+    schedule_line = (f"🗓 Scheduled: {bold(pending['scheduled_at_display'])}\n"
+                     if pending.get("scheduled_at") else "")
     summary = (
         f"📢 <b>Confirm Notification</b>\n{'─'*26}\n"
         f"📝 Title: {bold(title)}\n"
         f"🏷 Type: {code(kind)}\n"
         f"📂 Category: {bold(notify.CATEGORY_LABEL.get(cat, cat))}\n"
+        f"{schedule_line}"
         f"🖼 Poster: {'✅ attached' if pending.get('poster_url') else '⚠️ none (text-only message)'}\n"
         f"{'─'*26}"
     )
@@ -125,6 +184,18 @@ async def notify_confirm_cb(update, ctx: ContextTypes.DEFAULT_TYPE):
     pending = ctx.user_data.pop("pending_notify", None)
     if q.data == "ntf_confirm_no" or not pending:
         await q.edit_message_text("❌ <b>Notification cancelled.</b>", parse_mode=ParseMode.HTML)
+        return ConversationHandler.END
+
+    if pending.get("scheduled_at"):
+        await db.add_scheduled_notification({
+            "kind": pending["kind"], "item": pending["item"], "poster_url": pending.get("poster_url"),
+            "category": pending["category"], "title": pending.get("title"),
+            "scheduled_at": pending["scheduled_at"],
+            "created_by": update.effective_user.id if update.effective_user else None,
+        })
+        await q.edit_message_text(
+            f"🗓 <b>Notification scheduled</b> for {bold(pending['scheduled_at_display'])}.",
+            parse_mode=ParseMode.HTML)
         return ConversationHandler.END
 
     await q.edit_message_text("⏳ <i>Sending notification…</i>", parse_mode=ParseMode.HTML)

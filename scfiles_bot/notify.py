@@ -47,7 +47,7 @@ try:
                           CHANNEL_HANDLE as _CHANNEL_HANDLE, REQUESTS_HANDLES as _REQUESTS_HANDLES,
                           WATCH_BUTTON_PREFIX as _WATCH_BUTTON_PREFIX)
 except ImportError:
-    _TEMPLATES, _WEBSITE_LINK = {}, "https://scfiles.vercel.app"
+    _TEMPLATES, _WEBSITE_LINK = {}, "https://yourwebsite.com"
     _CHANNEL_HANDLE, _REQUESTS_HANDLES, _WATCH_BUTTON_PREFIX = "", "", "Watch . "
 
 logger = logging.getLogger("scfiles-bot.notify")
@@ -133,7 +133,7 @@ def _genre_line(genres) -> str:
     return " / ".join(n for n in names if n)
 
 # ── slug / watch-button / footer ──────────────────────────────────────────
-_URL_PATH = {"movie": "movie", "series": "series", "episode": "series", "collection": "collections"}
+_URL_PATH = {"movie": "movie", "series": "pages/series", "episode": "pages/series", "collection": "collections"}
 
 def _slug_id(kind: str, item: dict) -> str:
     """The slug used when the item was originally uploaded — collections

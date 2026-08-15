@@ -16,12 +16,14 @@ from telegram.constants import ParseMode
 from config import logger
 from utils import esc
 import notify
+import db
+from broadcast import build_broadcast_conversation
 
 try:
     from messages import (TEMPLATES as _TEMPLATES, WEBSITE_LINK as _WEBSITE_LINK,
                           CHANNEL_HANDLE as _CHANNEL_HANDLE, REQUESTS_HANDLES as _REQUESTS_HANDLES)
 except ImportError:
-    _TEMPLATES, _WEBSITE_LINK = {}, "https://scfiles.vercel.app"
+    _TEMPLATES, _WEBSITE_LINK = {}, "https://yourwebsite.com"
     _CHANNEL_HANDLE, _REQUESTS_HANDLES = "", ""
 
 
@@ -36,6 +38,9 @@ def _website_kb() -> InlineKeyboardMarkup:
 
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user:
+        await db.add_user(user.id, user.first_name or "")
     # channel_handle/requests_handles/website_link are supplied here so
     # BOT_START can reference them directly if you've customised it to
     # (as-is, the default BOT_START already does) — no separate footer is
@@ -62,6 +67,9 @@ def _relative_time(iso_ts: str) -> str:
 
 
 async def cmd_uploads(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user:
+        await db.add_user(user.id, user.first_name or "")
     entries = await notify.load_recent_uploads(10)
     if not entries:
         await update.message.reply_text(_fmt("BOT_UPLOADS_EMPTY"), parse_mode=ParseMode.HTML)
@@ -83,6 +91,7 @@ def build_notify_app(token: str) -> Application:
     app = Application.builder().token(token).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("uploads", cmd_uploads))
+    app.add_handler(build_broadcast_conversation())
     return app
 
 
@@ -90,7 +99,8 @@ async def register_commands(app: Application):
     """Re-registers the notify bot's command list — called on every startup
     so BotFather's command menu always reflects what's actually handled."""
     await app.bot.set_my_commands([
-        BotCommand("start",   "About this channel"),
-        BotCommand("uploads", "Show the last 10 uploads"),
+        BotCommand("start",     "About this channel"),
+        BotCommand("uploads",   "Show the last 10 uploads"),
+        BotCommand("broadcast", "Admin: broadcast to every channel/user"),
     ])
     logger.info("Notify-bot commands registered ✅")

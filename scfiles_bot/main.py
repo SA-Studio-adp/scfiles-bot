@@ -18,10 +18,11 @@ from config import (state, logger, IST, BOT_TOKEN, BACKEND_URL, WEB_HOST, WEB_PO
                      AUTO_PING_MIN, ADMIN_TOKEN)
 import db
 from errors import error_handler
-from scheduler import job_backup, job_ping
+from scheduler import job_backup, job_ping, job_send_scheduled_notifications
 
 from web.dashboard import web_dashboard, web_health, web_backup_zip, web_logs, web_admin_logs
 from web.admin_panel import web_admin
+from web.schedule_picker import web_schedule_picker
 
 from handlers.states import *  # noqa: F401,F403 — all AM_/AS_/AC_/DM_/.../EC_ constants
 
@@ -74,6 +75,7 @@ async def main():
     web_app.router.add_get("/logs",        web_logs)        # public (raw log)
     web_app.router.add_get("/admin",       web_admin)       # token-protected admin panel
     web_app.router.add_get("/admin/logs",  web_admin_logs)  # token-protected log for panel
+    web_app.router.add_get("/schedule",    web_schedule_picker)  # Telegram Web App date/time picker
     runner = web.AppRunner(web_app)
     await runner.setup()
     await web.TCPSite(runner, WEB_HOST, WEB_PORT).start()
@@ -104,7 +106,9 @@ async def main():
     # editseries). See handlers/notify_flow.py.
     def _notify_states():
         return {
-            NOTIFY_ASK:     [CallbackQueryHandler(h_notify.notify_ask_cb,     pattern="^ntf_")],
+            NOTIFY_ASK:     [CallbackQueryHandler(h_notify.notify_ask_cb,     pattern="^ntf_"),
+                              MessageHandler(filters.StatusUpdate.WEB_APP_DATA,
+                                            h_notify.notify_schedule_webapp_data)],
             NOTIFY_CAT:     [CallbackQueryHandler(h_notify.notify_cat_cb,     pattern="^ntf_")],
             NOTIFY_TITLE:   [MessageHandler(CB_ALL, h_notify.notify_title_msg)],
             NOTIFY_CONFIRM: [CallbackQueryHandler(h_notify.notify_confirm_cb, pattern="^ntf_")],
@@ -284,8 +288,10 @@ async def main():
     scheduler.add_job(job_backup, "interval", days=2, args=[app])
     scheduler.add_job(job_ping,   "interval", minutes=AUTO_PING_MIN,
                        next_run_time=datetime.now(IST) + timedelta(seconds=30))
+    scheduler.add_job(job_send_scheduled_notifications, "interval", minutes=1)
     scheduler.start()
-    logger.info("Scheduler: backup every 2d, ping every %dm", AUTO_PING_MIN)
+    logger.info("Scheduler: backup every 2d, ping every %dm, scheduled-notifications every 1m",
+                AUTO_PING_MIN)
 
     try:
         notify_app = None
