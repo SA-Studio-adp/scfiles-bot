@@ -41,8 +41,8 @@ AUTO_PING_MIN  = int(os.environ.get("AUTO_PING_INTERVAL_MIN","4"))
 ADMIN_TOKEN    = os.environ.get("ADMIN_TOKEN","changeme")   # protects /admin
 
 TMDB_BASE = "https://api.themoviedb.org/3"
-TMDB_IMG  = "https://image.tmdb.org/t/p/w780"
-TMDB_BACKDROP_IMG = "https://image.tmdb.org/t/p/w1280"   # landscape backdrops, full quality
+TMDB_IMG  = "https://image.tmdb.org/t/p/original"
+TMDB_BACKDROP_IMG = "https://image.tmdb.org/t/p/original"   # landscape backdrops, full quality
 IST       = pytz.timezone("Asia/Kolkata")
 
 # ── shared mutable runtime state ─────────────────────────────────────────

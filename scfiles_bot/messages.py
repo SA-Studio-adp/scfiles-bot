@@ -19,10 +19,10 @@ episode_line, event_label, movie_count) — don't escape them again here.
 """
 # Used to build every "Watch · <name>" button below, AND mentioned in the
 # footer's "For more visit" line:
-#   movie      -> {WEBSITE_LINK}/movie?id=<slug>
-#   series     -> {WEBSITE_LINK}/pages/series?id=<slug>
-#   collection -> {WEBSITE_LINK}/collections?id=<slug>
-WEBSITE_LINK = "https://scfiles.vercel.app"
+#   movie      -> {WEBSITE_LINK}/movie/<slug>
+#   series     -> {WEBSITE_LINK}/series/<slug>
+#   collection -> {WEBSITE_LINK}/collections/<slug>
+WEBSITE_LINK = "https://yourwebsite.com"
 CHANNEL_HANDLE    = "@sc_files4"
 REQUESTS_HANDLES  = "@sc_requests & @streamcenter_bot"
 WATCH_BUTTON_PREFIX = "Watch  •  "   # button label = this + the movie/series/collection name

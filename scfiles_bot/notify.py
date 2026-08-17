@@ -133,7 +133,7 @@ def _genre_line(genres) -> str:
     return " / ".join(n for n in names if n)
 
 # ── slug / watch-button / footer ──────────────────────────────────────────
-_URL_PATH = {"movie": "movie", "series": "pages/series", "episode": "pages/series", "collection": "collections"}
+_URL_PATH = {"movie": "movie", "series": "series", "episode": "series", "collection": "collections"}
 
 def _slug_id(kind: str, item: dict) -> str:
     """The slug used when the item was originally uploaded — collections
@@ -146,7 +146,7 @@ def _slug_id(kind: str, item: dict) -> str:
 def watch_url(kind: str, item: dict) -> str:
     path = _URL_PATH.get(kind, "movie")
     slug = _slug_id(kind, item)
-    return f"{_WEBSITE_LINK.rstrip('/')}/{path}?id={slug}"
+    return f"{_WEBSITE_LINK.rstrip('/')}/{path}/{slug}"
 
 def _watch_button(kind: str, item: dict, title: str) -> dict:
     """Inline keyboard with the 'Watch . <name>' button linking to the

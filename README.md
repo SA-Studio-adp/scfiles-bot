@@ -126,9 +126,9 @@ caption limit either. A fixed **footer** (channel handle, request-bot
 handles, website link — edit in `messages.py`'s `FOOTER` template) is
 appended, and a **"Watch · &lt;name&gt;" button** linking to your website
 is attached below, built from the item's slug ID:
-- movie → `WEBSITE_LINK/movie?id=<slug>`
-- series/episode update → `WEBSITE_LINK/pages/series?id=<slug>`
-- collection → `WEBSITE_LINK/collections?id=<slug>`
+- movie → `WEBSITE_LINK/movie/<slug>`
+- series/episode update → `WEBSITE_LINK/series/<slug>`
+- collection → `WEBSITE_LINK/collections/<slug>`
 
 **New season / new episode wording:** when `/editseries` saves, the bot
 tracks exactly which (season, episode) pairs were touched in that session.
