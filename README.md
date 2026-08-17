@@ -46,6 +46,7 @@ scfiles_bot/
 ├── errors.py                      ← global PTB error handler
 ├── scheduler.py                    ← periodic backup + self-ping jobs
 ├── notify.py                        ← channel-notification engine (routing, sending, upload history)
+├── notify_tokens.py                  ← short-lived tokens for pending notify prompts
 ├── notify_bot.py                     ← second Application (NOTIFY_BOT_TOKEN): /start, /uploads, /broadcast
 ├── broadcast.py                       ← /broadcast conversation (notify bot, admin-only)
 ├── messages.py                        ← EDIT THIS to restyle every notification/command message
@@ -145,28 +146,52 @@ reference (bold, italic, underline, quote blocks, spoilers, etc) is in
 `/removechannel <predvd|hd|all> <chat_id>` and `/listchannels` manage the
 registered list.
 
-## Schedule Notification
+## Notify prompt: notify / schedule / skip
 
-Between "Yes, notify" and "No, skip" in the notify prompt is a
-**"🗓 Schedule Notification"** button. It only appears when `BOT_WEB_URL`
-is set to a real public **HTTPS** URL — Telegram Web App buttons flatly
-refuse to open on `http://` or `localhost`, so without one configured the
-button is simply omitted rather than shown broken.
+Every successful upload asks three fully independent questions — none of
+them leave the bot "waiting", so you're always free to start the next
+upload immediately:
 
-Tapping it opens `BOT_WEB_URL/schedule` — a small page
-(`web/schedule_picker.py`) with a date/time picker (labelled IST, matching
-the rest of the bot) and quick +1h/+3h/+1 day/+1 week buttons. Picking a
-time uses Telegram's own `Telegram.WebApp.sendData()` bridge to hand the
-value back to the bot and close itself — no server-side session, no
-backend calls from the page at all. The bot then continues into the
-normal category → title → confirm flow; on confirm, the notification is
-stored in MongoDB (the `scheduled` collection) instead of sending
-immediately.
+1. **🔔 Yes, notify** — opens a short mini-conversation (category → title
+   → confirm) and sends right away.
+2. **🗓 Yes, schedule** — opens `BOT_WEB_URL/schedule` as a Telegram Web
+   App. Only appears when `BOT_WEB_URL` is a real public **HTTPS** URL —
+   Web App buttons flatly refuse `http://`/`localhost`, so without one
+   configured the button is simply omitted.
+3. **🔕 No, skip** — dismisses the prompt.
 
-A background job (`scheduler.job_send_scheduled_notifications`, every
-1 minute) sends anything whose time has arrived and marks it sent — so a
-missed minute or two of bot downtime just means a slightly late send, not
-a lost notification, since it's picked up on the next check after restart.
+Each prompt gets its own short-lived token (`notify_tokens.py`), so
+uploading several things in a row and leaving their prompts unresolved
+never causes one to clobber another — and importantly, **the calling
+upload conversation ends the instant the prompt is shown**, regardless of
+which button (if any) gets tapped. This is deliberate: earlier versions
+kept the upload conversation alive waiting for the prompt to resolve,
+which could leave `/addmovie` unresponsive for an admin until they
+resolved (or `/cancel`led) a stale prompt — that's no longer possible.
+
+### How scheduling actually works
+
+The picker page (`web/schedule_picker.py`) collects date/time (IST),
+category, and title all on one page, then **POSTs directly to our own
+server** (`/schedule/submit`) — deliberately *not* through Telegram's
+`Web App sendData()` → `web_app_data` message delivery, which turned out
+to be unreliable for Web App buttons opened from an inline keyboard.
+Talking directly to our own endpoint is fully within our control and independently testable.
+
+On submit, the server:
+1. Writes the scheduled notification to MongoDB (the `scheduled`
+   collection).
+2. Immediately sends **"🗓 `<title>` has been scheduled for `<time>`"**
+   into your chat via the admin bot, and records that message's
+   chat/message ID.
+3. A background job (`scheduler.job_send_scheduled_notifications`, every
+   1 minute) sends anything whose time has arrived, then **edits that
+   same confirmation message in place** to
+   **"✅ `<title>` sent to N group(s)/channel(s) successfully at `<time>`"**
+   (or a clear failure message if nothing was sent) — so you get a single
+   message that updates itself once, rather than a second notification.
+   A missed minute or two of bot downtime just means a slightly late
+   send, not a lost one, since it's picked up on the next check.
 
 ## /broadcast
 

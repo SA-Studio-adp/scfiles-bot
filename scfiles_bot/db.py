@@ -31,7 +31,9 @@ needed — just an empty/existing MongoDB database):
                {_id: <user_id int>, first_name} — /broadcast's recipient list
   scheduled  — one document per scheduled notification:
                {kind, item, poster_url, category, title, scheduled_at (UTC
-               ISO string), sent (bool), created_by}
+               ISO string), scheduled_at_display, sent (bool), created_by,
+               confirmation_chat_id, confirmation_message_id — the "🗓
+               scheduled" message the background job edits once sent}
 """
 import logging
 import os
@@ -164,11 +166,21 @@ async def get_all_channel_ids() -> list:
 
 
 # ── scheduled notifications ───────────────────────────────────────────────
-async def add_scheduled_notification(doc: dict) -> str:
+async def add_scheduled_notification(doc: dict):
+    """Returns the raw Mongo _id (ObjectId) — pass it straight into
+    set_scheduled_confirmation_message / mark_scheduled_notification_sent,
+    no string conversion needed."""
     doc = dict(doc)
     doc["sent"] = False
     result = await _get_db().scheduled.insert_one(doc)
-    return str(result.inserted_id)
+    return result.inserted_id
+
+async def set_scheduled_confirmation_message(_id, chat_id, message_id):
+    """Records which chat/message the "🗓 scheduled" confirmation was sent
+    as, so the background job can EDIT it in place once the notification
+    actually sends (see scheduler.job_send_scheduled_notifications)."""
+    await _get_db().scheduled.update_one(
+        {"_id": _id}, {"$set": {"confirmation_chat_id": chat_id, "confirmation_message_id": message_id}})
 
 async def get_due_scheduled_notifications(now_iso: str) -> list:
     """Unsent notifications whose scheduled_at has already passed."""

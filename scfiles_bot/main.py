@@ -22,7 +22,7 @@ from scheduler import job_backup, job_ping, job_send_scheduled_notifications
 
 from web.dashboard import web_dashboard, web_health, web_backup_zip, web_logs, web_admin_logs
 from web.admin_panel import web_admin
-from web.schedule_picker import web_schedule_picker
+from web.schedule_picker import web_schedule_picker, web_schedule_info, web_schedule_submit
 
 from handlers.states import *  # noqa: F401,F403 — all AM_/AS_/AC_/DM_/.../EC_ constants
 
@@ -75,7 +75,9 @@ async def main():
     web_app.router.add_get("/logs",        web_logs)        # public (raw log)
     web_app.router.add_get("/admin",       web_admin)       # token-protected admin panel
     web_app.router.add_get("/admin/logs",  web_admin_logs)  # token-protected log for panel
-    web_app.router.add_get("/schedule",    web_schedule_picker)  # Telegram Web App date/time picker
+    web_app.router.add_get("/schedule",         web_schedule_picker)  # Telegram Web App date/time picker
+    web_app.router.add_get("/schedule/info",    web_schedule_info)    # title-suggestion lookup by token
+    web_app.router.add_post("/schedule/submit", web_schedule_submit)  # direct-to-server schedule submit
     runner = web.AppRunner(web_app)
     await runner.setup()
     await web.TCPSite(runner, WEB_HOST, WEB_PORT).start()
@@ -92,6 +94,10 @@ async def main():
         .pool_timeout(30)
         .build()
     )
+    # web/schedule_picker.py's submit endpoint uses this to send the
+    # "🗓 scheduled" confirmation message directly (outside any PTB update
+    # cycle, since it's triggered by an HTTP POST from the picker page).
+    web_app["admin_bot"] = app.bot
 
     CB_ALL = filters.TEXT & ~filters.COMMAND
 
@@ -101,18 +107,14 @@ async def main():
         category=UserWarning,
     )
 
-    # Shared post-upload notify states — spliced into every conversation
-    # that can end in a successful upload (addmovie/addseries/addcollection/
-    # editseries). See handlers/notify_flow.py.
-    def _notify_states():
-        return {
-            NOTIFY_ASK:     [CallbackQueryHandler(h_notify.notify_ask_cb,     pattern="^ntf_"),
-                              MessageHandler(filters.StatusUpdate.WEB_APP_DATA,
-                                            h_notify.notify_schedule_webapp_data)],
-            NOTIFY_CAT:     [CallbackQueryHandler(h_notify.notify_cat_cb,     pattern="^ntf_")],
-            NOTIFY_TITLE:   [MessageHandler(CB_ALL, h_notify.notify_title_msg)],
-            NOTIFY_CONFIRM: [CallbackQueryHandler(h_notify.notify_confirm_cb, pattern="^ntf_")],
-        }
+    # Notify prompts (handlers/notify_flow.py) are fully decoupled from
+    # these upload conversations now — start_notify_flow() sends its own
+    # message and returns ConversationHandler.END immediately, so nothing
+    # here ever waits on how (or whether) that prompt gets resolved. A
+    # conversation_timeout is still set on each as a defensive safety net
+    # in case a conversation is ever abandoned mid-flow for any other
+    # reason — it just quietly expires instead of blocking that admin's
+    # next command indefinitely.
 
     # ── add movie ─────────────────────────────────────────────────────────
     app.add_handler(ConversationHandler(
@@ -126,9 +128,9 @@ async def main():
             AM_SUB:    [MessageHandler(CB_ALL, h_movie_add.am_sub)],
             AM_POS:    [CallbackQueryHandler(h_movie_add.am_pos_cb,     pattern="^pos_")],
             AM_CONFIRM:[CallbackQueryHandler(h_movie_add.am_confirm_cb, pattern="^mov_(confirm|cancel)")],
-            **_notify_states(),
         },
         fallbacks=[CommandHandler("cancel", h_basic.cmd_cancel)],
+        conversation_timeout=300,
         per_message=False))
 
     # ── add series ────────────────────────────────────────────────────────
@@ -144,9 +146,9 @@ async def main():
             AS_EP_SUB: [MessageHandler(CB_ALL, h_series_add.as_ep_sub)],
             AS_EP_MORE:[CallbackQueryHandler(h_series_add.as_ep_more_cb, pattern="^ep_"),
                         CallbackQueryHandler(h_series_add.as_confirm_cb, pattern="^sr_")],
-            **_notify_states(),
         },
         fallbacks=[CommandHandler("cancel", h_basic.cmd_cancel)],
+        conversation_timeout=300,
         per_message=False))
 
     # ── edit series ───────────────────────────────────────────────────────
@@ -165,9 +167,9 @@ async def main():
             ESS_EP_SUB:  [MessageHandler(CB_ALL, h_series_edit.ess_ep_sub)],
             ESS_EP_MORE: [CallbackQueryHandler(h_series_edit.ess_ep_more_cb, pattern="^ep_")],
             ESS_DEL_EP:  [CallbackQueryHandler(h_series_edit.ess_del_ep_cb,  pattern="^ess_")],
-            **_notify_states(),
         },
         fallbacks=[CommandHandler("cancel", h_basic.cmd_cancel)],
+        conversation_timeout=300,
         per_message=False))
 
     # ── add collection ────────────────────────────────────────────────────
@@ -183,9 +185,9 @@ async def main():
             AC_MOV_DL:   [MessageHandler(CB_ALL, h_col_add.ac_mov_dl)],
             AC_MOV_MORE: [CallbackQueryHandler(h_col_add.ac_mov_more_cb, pattern="^acm_"),
                           CallbackQueryHandler(h_col_add.ac_confirm_cb,  pattern="^col_")],
-            **_notify_states(),
         },
         fallbacks=[CommandHandler("cancel", h_basic.cmd_cancel)],
+        conversation_timeout=300,
         per_message=False))
 
     # ── edit collection ───────────────────────────────────────────────────
@@ -232,6 +234,22 @@ async def main():
         },
         fallbacks=[CommandHandler("cancel", h_basic.cmd_cancel)],
         per_message=False))
+
+    # ── notify prompt: "Yes, notify" mini-conversation + standalone "No" ──
+    # (handlers/notify_flow.py — fully independent of the upload
+    # conversations above; "Yes, schedule" needs no bot-side handler at
+    # all since it talks directly to web/schedule_picker.py's endpoints)
+    app.add_handler(ConversationHandler(
+        entry_points=[CallbackQueryHandler(h_notify.notify_yes_entry, pattern="^ntf_yes:")],
+        states={
+            NOTIFY_CAT:     [CallbackQueryHandler(h_notify.notify_cat_cb,     pattern="^ntfc_cat_")],
+            NOTIFY_TITLE:   [MessageHandler(CB_ALL, h_notify.notify_title_msg)],
+            NOTIFY_CONFIRM: [CallbackQueryHandler(h_notify.notify_confirm_cb, pattern="^ntfc_confirm_")],
+        },
+        fallbacks=[CommandHandler("cancel", h_notify.notify_yes_cancel)],
+        conversation_timeout=300,
+        per_message=False))
+    app.add_handler(CallbackQueryHandler(h_notify.notify_no_cb, pattern="^ntf_no:"))
 
     # ── tmdb search ───────────────────────────────────────────────────────
     app.add_handler(ConversationHandler(
@@ -288,7 +306,7 @@ async def main():
     scheduler.add_job(job_backup, "interval", days=2, args=[app])
     scheduler.add_job(job_ping,   "interval", minutes=AUTO_PING_MIN,
                        next_run_time=datetime.now(IST) + timedelta(seconds=30))
-    scheduler.add_job(job_send_scheduled_notifications, "interval", minutes=1)
+    scheduler.add_job(job_send_scheduled_notifications, "interval", minutes=1, args=[app])
     scheduler.start()
     logger.info("Scheduler: backup every 2d, ping every %dm, scheduled-notifications every 1m",
                 AUTO_PING_MIN)
