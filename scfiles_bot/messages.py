@@ -22,7 +22,7 @@ episode_line, event_label, movie_count) — don't escape them again here.
 #   movie      -> {WEBSITE_LINK}/movie/<slug>
 #   series     -> {WEBSITE_LINK}/series/<slug>
 #   collection -> {WEBSITE_LINK}/collections/<slug>
-WEBSITE_LINK = "https://yourwebsite.com"
+WEBSITE_LINK = "https://scfiles.vercel.app"
 CHANNEL_HANDLE    = "@sc_files4"
 REQUESTS_HANDLES  = "@sc_requests & @streamcenter_bot"
 WATCH_BUTTON_PREFIX = "Watch  •  "   # button label = this + the movie/series/collection name
