@@ -67,14 +67,22 @@ async def start_notify_flow(update, ctx: ContextTypes.DEFAULT_TYPE, *,
                              kind: str, item: dict, poster_url: str = None):
     """Sends the Yes/Schedule/No prompt and ALWAYS returns
     ConversationHandler.END for the calling (upload) conversation - the
-    prompt itself is handled entirely independently (see module docstring)."""
+    prompt itself is handled entirely independently (see module docstring).
+
+    The prompt message's own chat_id/message_id are recorded on the token
+    right after sending, so that IF the schedule path is chosen (which
+    produces no bot-side event when the button is first tapped — see
+    module docstring), web/schedule_picker.py's submit endpoint can still
+    delete this prompt once scheduling actually completes."""
     chat_id = update.effective_chat.id if update.effective_chat else None
     token = notify_tokens.create({"kind": kind, "item": item, "poster_url": poster_url, "chat_id": chat_id})
     text = "🔔 <b>Send a notification for this upload?</b>"
     if update.callback_query:
-        await update.callback_query.message.reply_text(text, reply_markup=_ask_kb(token), parse_mode=ParseMode.HTML)
+        msg = await update.callback_query.message.reply_text(text, reply_markup=_ask_kb(token), parse_mode=ParseMode.HTML)
     else:
-        await update.message.reply_text(text, reply_markup=_ask_kb(token), parse_mode=ParseMode.HTML)
+        msg = await update.message.reply_text(text, reply_markup=_ask_kb(token), parse_mode=ParseMode.HTML)
+    if msg is not None:
+        notify_tokens.update(token, prompt_chat_id=msg.chat_id, prompt_message_id=msg.message_id)
     return ConversationHandler.END
 
 

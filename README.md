@@ -179,12 +179,16 @@ to be unreliable for Web App buttons opened from an inline keyboard.
 Talking directly to our own endpoint is fully within our control and independently testable.
 
 On submit, the server:
-1. Writes the scheduled notification to MongoDB (the `scheduled`
+1. Deletes the original "Yes, notify / Yes, schedule / No, skip" prompt
+   message — tapping the Web App button produces no bot-side event when
+   it's *opened*, so this is the only point where that cleanup can happen;
+   the prompt's own chat/message ID is recorded on the token the moment
+   it's sent, specifically for this.
+2. Writes the scheduled notification to MongoDB (the `scheduled`
    collection).
-2. Immediately sends **"🗓 `<title>` has been scheduled for `<time>`"**
-   into your chat via the admin bot, and records that message's
-   chat/message ID.
-3. A background job (`scheduler.job_send_scheduled_notifications`, every
+3. Sends **"🗓 `<title>` has been scheduled for `<time>`"** into your chat
+   via the admin bot, and records that message's chat/message ID.
+4. A background job (`scheduler.job_send_scheduled_notifications`, every
    1 minute) sends anything whose time has arrived, then **edits that
    same confirmation message in place** to
    **"✅ `<title>` sent to N group(s)/channel(s) successfully at `<time>`"**

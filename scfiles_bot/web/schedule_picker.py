@@ -353,6 +353,21 @@ async def web_schedule_submit(req: web.Request) -> web.Response:
 
     admin_bot = req.app.get("admin_bot")
     chat_id = entry.get("chat_id")
+
+    # Delete the original "Yes, notify / Yes, schedule / No, skip" prompt —
+    # tapping the Web App button produces no bot-side event, so this is the
+    # only point where we can clean it up: right when scheduling actually
+    # completes. Best-effort; a failure here (message already deleted,
+    # too old, etc) shouldn't block the rest of the response.
+    prompt_chat_id = entry.get("prompt_chat_id")
+    prompt_message_id = entry.get("prompt_message_id")
+    if admin_bot and prompt_chat_id and prompt_message_id:
+        try:
+            await admin_bot.delete_message(prompt_chat_id, prompt_message_id)
+        except Exception as e:
+            logger.warning("Couldn't delete the original notify prompt %s/%s: %s",
+                           prompt_chat_id, prompt_message_id, e)
+
     if admin_bot and chat_id:
         try:
             msg = await admin_bot.send_message(

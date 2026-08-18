@@ -34,6 +34,18 @@ def get(token: str):
         return None
     return entry
 
+def update(token: str, **fields) -> bool:
+    """Merges extra fields into an existing token's data (e.g. recording
+    which message the prompt was sent as, once it's actually been sent —
+    the token has to exist before the message can reference it in its
+    button URL, so this fills in the message_id afterward). Returns False
+    if the token doesn't exist / already expired."""
+    entry = get(token)
+    if entry is None:
+        return False
+    entry.update(fields)
+    return True
+
 def pop(token: str):
     entry = get(token)
     _TOKENS.pop(token, None)
