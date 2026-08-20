@@ -29,7 +29,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📖 <b>Commands</b>\n\n"
-        "<b>Info</b>\n/start · /status · /stats\n/movies · /series · /collections\n\n"
+        "<b>Info</b>\n/start · /status · /substatus · /stats\n/movies · /series · /collections\n\n"
         "<b>Add Content</b> <i>(admin)</i>\n/addmovie · /addseries · /addcollection\n\n"
         "<b>Manage</b> <i>(admin)</i>\n/editmovie · /editseries · /editcollection\n/delmovie · /delseries · /delcollection\n\n"
         "<b>Admins</b> <i>(admin)</i>\n/addadmin · /removeadmin · /listadmins\n\n"
@@ -78,7 +78,34 @@ async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"🕐 <i>{datetime.now(IST).strftime('%d %b %Y, %H:%M IST')}</i>",
         parse_mode=ParseMode.HTML, reply_markup=back_kb())
 
-async def cmd_movies(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def cmd_substatus(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return await update.message.reply_text("⛔ Access denied.", parse_mode=ParseMode.HTML)
+
+    from telegram import Bot
+    from notify import NOTIFY_BOT_TOKEN
+    from subs_bot import SUB_BOT_TOKEN
+
+    async def _bot_line(label: str, icon: str, token: str, started_at) -> str:
+        if not token:
+            return f"{icon} {label} → ⚪ Not configured  <i>(token unset)</i>"
+        if not started_at:
+            return f"{icon} {label} → 🔴 Configured but not running  <i>(check logs)</i>"
+        uptime = str(datetime.now(IST) - started_at).split(".")[0]
+        try:
+            me = await Bot(token).get_me()
+            return f"{icon} {label} → 🟢 Online  |  ⏱ <code>{uptime}</code>  |  @{esc(me.username)}"
+        except Exception as e:
+            return f"{icon} {label} → 🟡 Was polling, ping failed  |  ❗ <code>{esc(str(e)[:80])}</code>"
+
+    lines = [
+        await _bot_line("Notify bot", "📣", NOTIFY_BOT_TOKEN, state.NOTIFY_BOT_STARTED_AT),
+        await _bot_line("Subs bot", "🎬", SUB_BOT_TOKEN, state.SUBS_BOT_STARTED_AT),
+    ]
+    await update.message.reply_text(
+        f"🖥 <b>Companion Bots</b>\n{'─'*28}\n" + "\n".join(lines),
+        parse_mode=ParseMode.HTML, reply_markup=back_kb())
+
     items = (await api_get("/api/movies?limit=15") or [])[:15]
     if not items:
         return await update.message.reply_text("📭 No movies found.", parse_mode=ParseMode.HTML)
