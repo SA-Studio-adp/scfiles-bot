@@ -40,6 +40,7 @@ BOT_WEB_URL    = os.environ.get("BOT_WEB_URL","").rstrip("/")
 AUTO_PING_MIN  = int(os.environ.get("AUTO_PING_INTERVAL_MIN","4"))
 ADMIN_TOKEN    = os.environ.get("ADMIN_TOKEN","changeme")   # protects /admin
 
+
 TMDB_BASE = "https://api.themoviedb.org/3"
 TMDB_IMG  = "https://image.tmdb.org/t/p/w780"
 TMDB_BACKDROP_IMG = "https://image.tmdb.org/t/p/w1280"   # landscape backdrops, full quality
@@ -59,5 +60,10 @@ class _State:
         # seeded from ADMIN_IDS env var, extended at runtime by /addadmin
         # (and by whatever's already in Mongo — see main.py startup)
         self.ADMIN_IDS: list[int] = list(_ENV_ADMIN_IDS)
+        # notify bot / subs bot runtime status — set by main.py after each
+        # Application actually finishes start_polling(), read by /status
+        # and /substatus. None/False means "not configured or failed to start".
+        self.NOTIFY_BOT_STARTED_AT = None
+        self.SUBS_BOT_STARTED_AT   = None
 
 state = _State()

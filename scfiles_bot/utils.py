@@ -8,6 +8,12 @@ def bold(v):   return f"<b>{esc(v)}</b>"
 def code(v):   return f"<code>{esc(v)}</code>"
 def italic(v): return f"<i>{esc(v)}</i>"
 
+def progress_bar(pct: float, width: int = 20) -> str:
+    """Text progress bar, e.g. progress_bar(35) -> '███████░░░░░░░░░░░░░ 35%'."""
+    pct = max(0, min(100, pct))
+    filled = int(width * pct / 100)
+    return "█" * filled + "░" * (width - filled) + f" {pct:.0f}%"
+
 # ── TTL cache (30 s) ──────────────────────────────────────────────────────────
 _CACHE: dict[str, tuple[float, object]] = {}
 _CACHE_TTL = 30

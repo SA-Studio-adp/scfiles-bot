@@ -40,6 +40,7 @@ from handlers import menu as h_menu
 from handlers import notify_flow as h_notify
 from notify import NOTIFY_BOT_TOKEN
 from notify_bot import build_notify_app, register_commands as register_notify_commands
+from subs_bot import SUB_BOT_TOKEN, build_subs_app, register_commands as register_subs_commands
 
 
 async def main():
@@ -270,6 +271,7 @@ async def main():
         ("help",           h_basic.cmd_help),
         ("cancel",         h_basic.cmd_cancel),
         ("status",         h_basic.cmd_status),
+        ("substatus",      h_basic.cmd_substatus),
         ("stats",          h_basic.cmd_stats),
         ("movies",         h_basic.cmd_movies),
         ("series",         h_basic.cmd_series),
@@ -322,6 +324,7 @@ async def main():
                     ("start",          "Main menu"),
                     ("help",           "All commands"),
                     ("status",         "Server health"),
+                    ("substatus",      "Notify/Subs bot status"),
                     ("stats",          "DB statistics"),
                     ("movies",         "List movies"),
                     ("series",         "List series"),
@@ -403,11 +406,30 @@ async def main():
                     bootstrap_retries=-1,
                 )
                 logger.info("Notify bot polling started ✅ (/start, /uploads)")
+                state.NOTIFY_BOT_STARTED_AT = datetime.now(IST)
             except Exception as e:
                 logger.error("Notify bot failed to start: %s — continuing without it", e)
                 notify_app = None
         else:
             logger.info("NOTIFY_BOT_TOKEN not set — channel notifications disabled")
+
+        # ── subtitle extraction bot (Pyrogram client, not PTB) ───────────
+        # Different lifecycle from the two bots above: Pyrogram's Client
+        # manages its own update loop internally once started — no
+        # updater.start_polling()/delete_webhook() equivalent needed.
+        subs_app = None
+        if SUB_BOT_TOKEN:
+            try:
+                subs_app = build_subs_app()
+                await subs_app.start()
+                await register_subs_commands(subs_app)
+                logger.info("Subs bot started ✅ (send it a video)")
+                state.SUBS_BOT_STARTED_AT = datetime.now(IST)
+            except Exception as e:
+                logger.error("Subs bot failed to start: %s — continuing without it", e)
+                subs_app = None
+        else:
+            logger.info("SUB_BOT_TOKEN not set — subtitle extraction bot disabled")
 
         await asyncio.Event().wait()
     finally:
@@ -432,6 +454,11 @@ async def main():
                 await notify_app.shutdown()
             except Exception as e:
                 logger.warning("notify_app shutdown: %s", e)
+        if subs_app is not None:
+            try:
+                await subs_app.stop()
+            except Exception as e:
+                logger.warning("subs_app shutdown: %s", e)
         await runner.cleanup(); scheduler.shutdown(wait=False)
         from api_client import close_session
         await close_session()
