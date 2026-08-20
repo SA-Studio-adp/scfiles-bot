@@ -49,6 +49,8 @@ scfiles_bot/
 ├── notify_tokens.py                  ← short-lived tokens for pending notify prompts
 ├── notify_bot.py                     ← second Application (NOTIFY_BOT_TOKEN): /start, /uploads, /broadcast
 ├── broadcast.py                       ← /broadcast conversation (notify bot, admin-only)
+├── subtitle_extract.py                 ← ffmpeg embedded-track extraction + optional OCR for hardcoded subs
+├── subs_bot.py                          ← third Application (SUB_BOT_TOKEN): send a video, get back .srt files
 ├── messages.py                        ← EDIT THIS to restyle every notification/command message
 ├── formats.md                          ← HTML formatting reference for messages.py (bold, italic, etc)
 │
@@ -102,6 +104,47 @@ Two bots are involved:
   uploads to your channels and answers `/start` and `/uploads` there. Add
   **this one** as admin to every channel/group you want notifications in —
   the admin bot doesn't need to be there too.
+
+## v4.2: subtitle extraction bot
+
+A third, independent bot for `SUB_BOT_TOKEN`: DM it a video file and it
+extracts every subtitle track, sends each back as `<name>.<lang>.srt`,
+then deletes the downloaded video and generated subtitles from the
+server — nothing is kept.
+
+Unlike the admin bot and notify bot (both on python-telegram-bot, the
+HTTP Bot API), this one runs on **[Pyrogram](https://docs.pyrogram.org/)**,
+which talks MTProto directly to Telegram — the same protocol official
+clients use. That's a deliberate, large-files-only choice: the cloud HTTP
+Bot API hard-caps downloads at 20MB and uploads at 50MB with no config
+workaround, while MTProto supports bot file transfers up to ~2000MB with
+no extra infrastructure (no local server, no second URL). The admin/notify
+bots never touch large files, so they stay on python-telegram-bot as-is.
+
+- Embedded tracks (mkv/mp4 internal streams) are extracted via `ffmpeg`
+  — this is the primary, reliable path.
+- Hardcoded/burned-in subtitles (no embedded track at all) can optionally
+  be recovered via OCR — set `SUBS_OCR_ENABLED=1`. This is a best-effort
+  fallback: it samples frames, OCRs the bottom of the screen, and is
+  slower and less accurate than embedded extraction. Leave it off unless
+  you actually need it.
+
+**Setup — this bot needs a free `api_id`/`api_hash`, not just a bot
+token** (Pyrogram requires this for every client, bot or not):
+
+1. Go to https://my.telegram.org/apps, log in with the phone number tied
+   to the bot owner's account, and create an app.
+2. Set `SUB_BOT_TOKEN`, `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` in `.env`.
+3. Deploy as normal — no extra service, no `docker-compose` changes, no
+   second URL to configure. It's just another Python import.
+
+Env vars: `SUB_BOT_TOKEN` / `TELEGRAM_API_ID` / `TELEGRAM_API_HASH`
+(all required to enable it), `SUBS_MAX_FILE_MB` (default 1900 — the real
+MTProto ceiling), `SUBS_OCR_ENABLED` (default off), `SUBS_OCR_INTERVAL`
+(seconds between OCR frame samples, default 1.0).
+
+Check whether the notify bot and subs bot are actually up (as opposed to
+just having a token set) with `/substatus` on the admin bot.
 
 **Register a channel:** in a DM with the ADMIN bot, either:
 - `/addchannel -1001234567890` if you already know the chat ID, or

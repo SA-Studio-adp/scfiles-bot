@@ -4,3 +4,16 @@ apscheduler>=3.10
 pytz>=2024.1
 python-dotenv>=1.0
 motor>=3.4
+
+# subtitle extraction bot — Pyrogram (MTProto, not the HTTP Bot API) so it
+# can move files up to ~2GB. tgcrypto is optional but speeds up MTProto
+# crypto significantly; Pyrogram works without it, just slower.
+pyrogram>=2.0.106
+tgcrypto>=1.2.5
+
+# embedded-track extraction itself only needs ffmpeg (a system binary,
+# installed in the Dockerfile, not pip). The two packages below are only
+# imported if SUBS_OCR_ENABLED=1, for the hardcoded/burned-in subtitle OCR
+# fallback; comment them out if you never plan to enable OCR mode.
+opencv-python-headless>=4.9
+pytesseract>=0.3.10

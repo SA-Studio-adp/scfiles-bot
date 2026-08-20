@@ -7,6 +7,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# ffmpeg is required by the subtitle-extraction bot (embedded track pulls).
+# tesseract-ocr is only needed if SUBS_OCR_ENABLED=1 (hardcoded/burned-in
+# subtitle OCR fallback) — installed unconditionally here for simplicity
+# since it's a small package; the bot just skips OCR if unused.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ffmpeg tesseract-ocr \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install deps first so this layer is cached unless requirements.txt changes
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
