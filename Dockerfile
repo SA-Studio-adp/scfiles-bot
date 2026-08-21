@@ -15,9 +15,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg tesseract-ocr \
     && rm -rf /var/lib/apt/lists/*
 
-# Install deps first so this layer is cached unless requirements.txt changes
+# Install deps first so this layer is cached unless requirements.txt changes.
+# tgcrypto (Pyrogram's optional-but-recommended MTProto crypto speedup) ships
+# as a C extension with no prebuilt wheel for this base image, so it needs a
+# compiler — install gcc/headers just for this step, then strip them back out
+# so they don't bloat the final image.
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN apt-get update && apt-get install -y --no-install-recommends gcc python3-dev \
+    && pip install --no-cache-dir -r requirements.txt \
+    && apt-get purge -y --auto-remove gcc python3-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 # App code
 COPY run.py .
