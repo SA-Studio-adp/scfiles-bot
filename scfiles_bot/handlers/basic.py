@@ -106,6 +106,7 @@ async def cmd_substatus(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"🖥 <b>Companion Bots</b>\n{'─'*28}\n" + "\n".join(lines),
         parse_mode=ParseMode.HTML, reply_markup=back_kb())
 
+async def cmd_movies(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     items = (await api_get("/api/movies?limit=15") or [])[:15]
     if not items:
         return await update.message.reply_text("📭 No movies found.", parse_mode=ParseMode.HTML)
